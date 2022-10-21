@@ -1,0 +1,1 @@
+The results of the analyses using KUL3 tumour cells will be saved in this folder.

@@ -1,0 +1,1 @@
+The results of the analyses using the SMC data will be saved in this folder.
