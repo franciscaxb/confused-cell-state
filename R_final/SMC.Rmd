@@ -1,0 +1,373 @@
+---
+title: "SMC Dataset Classification"
+output: html_notebook
+---
+
+# General
+
+Load necessary libraries.
+
+```{r}
+dir <- choose.dir() #Select file "R_final"
+# setwd(dir)
+
+# data manipulation
+library(Seurat)
+library(SeuratData) # devtools::install_github('satijalab/seurat-data')
+library(data.table)
+library(Matrix)
+library(dplyr)
+library(stringr)
+library(readr)
+
+# initial filtering
+library(DropletUtils) #BiocManager::install("DropletUtils")
+
+# gene set enrichment
+#library(gprofiler2)
+
+# plotting
+library(ggplot2)
+library(patchwork)
+#library(gplots)
+#library(cowplot)
+
+
+set.seed(1)
+
+#memory.limit(size = 70000)
+```
+
+
+
+# Step 1. Create a Seurat objects
+
+The data was obtained from: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE132465
+The data was not correctly formatted for Read10x function, so additional steps had to be performed once, following instructions here: https://www.biostars.org/p/449217/
+
+```{r}
+metadata <- fread(paste0(dir,"/Data/GSE132465_GEO_processed_CRC_10X_cell_annotation.txt.gz"))
+metadata <- filter(metadata, metadata$Cell_type == "Epithelial cells")
+rownames(metadata) <- metadata$Index
+cols <- metadata$Index
+
+# # Data has gene names as rows, and sample names/indexes as columns
+# data <- fread(paste0(dir,"/Data/GSE132465_GEO_processed_CRC_10X_raw_UMI_count_matrix.txt.gz"), select = c("Index",cols))
+# head(data[,1:10])
+# sparse.mat <- Matrix(as.matrix(data[, -1, with=FALSE]), sparse=TRUE)
+# DropletUtils::write10xCounts(paste0(dir, "/Data/GSE132465_SMC"), x = sparse.mat,
+#                            gene.id = data$Index)
+# rca.data <- DropletUtils::read10xCounts(paste0(dir, "/Data/GSE132465_SMC"), col.names=TRUE)
+
+smc.data <- Read10X(data.dir = paste0(dir, "/Data/GSE132465_SMC"))
+dim(smc.data)
+
+smc_seurat <- CreateSeuratObject(smc.data, project = "smc_seurat", meta.data = metadata)
+smc_seurat
+
+smc_normal <- subset(smc_seurat, subset = Class == "Normal")
+smc_tumour <- subset(smc_seurat, subset = Class == "Tumor")
+dim(smc_normal)
+dim(smc_tumour)
+
+saveRDS(smc_normal, file = "./Results/SMC/smc_normal.RDS")
+saveRDS(smc_tumour, file = "./Results/SMC/smc_tumour.RDS")
+# smc_normal <- readRDS("./Results/SMC/smc_normal.RDS")
+# smc_tumour <- readRDS("./Results/SMC/smc_tumour.RDS")
+```
+
+
+
+# Step 2. Check quality control
+
+
+```{r, fig.height=10, fig.width=20}
+smc_normal <- PercentageFeatureSet(smc_normal, col.name = "percent.mt", pattern = "^MT-")
+smc_tumour <- PercentageFeatureSet(smc_tumour, col.name = "percent.mt", pattern = "^MT-")
+
+VlnPlot(smc_normal, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(smc_tumour, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+
+
+# Step 3. Normalisation, feature selection, data scaling, PCA and UMAP
+
+```{r}
+smc_normal <- NormalizeData(smc_normal, normalization.method = "LogNormalize", scale.factor =   10000)
+smc_normal <- FindVariableFeatures(smc_normal, selection.method = "vst", nfeatures = 3000)
+smc_normal <- ScaleData(smc_normal, features = rownames(smc_normal))
+smc_normal <- RunPCA(smc_normal, npcs = 50)
+smc_normal <- RunUMAP(smc_normal, dims = 1:20)
+
+smc_tumour <- NormalizeData(smc_tumour, normalization.method = "LogNormalize", scale.factor =   10000)
+smc_tumour <- FindVariableFeatures(smc_tumour, selection.method = "vst", nfeatures = 3000)
+smc_tumour <- ScaleData(smc_tumour, features = rownames(smc_tumour))
+smc_tumour <- RunPCA(smc_tumour, npcs = 50)
+smc_tumour <- RunUMAP(smc_tumour, dims = 1:20)
+
+saveRDS(smc_normal, file = "./Results/SMC/smc_normal_2.RDS")
+saveRDS(smc_tumour, file = "./Results/SMC/smc_tumour_2.RDS")
+#smc_normal <- readRDS("./Results/SMC/smc_normal_2.RDS")
+#smc_tumour <- readRDS("./Results/SMC/smc_tumour_2.RDS")
+```
+
+
+
+# Step 4. Classification
+
+```{r}
+library(scAnnotatR)
+
+path_to_models = paste0(dir,"/scAnnotatR")
+models <- load_models(path_to_models)
+names(models)
+```
+
+```{r}
+c_types <- c("Stem_TA cells","Intermediate cells","Colonocytes","BEST4 cells",
+             "Goblet cells","Tuft cells")
+
+seurat.obj.smc_normal <- classify_cells(classify_obj = smc_normal, 
+                             assay = 'RNA', slot = 'data',
+                             cell_types = c_types,
+                             path_to_models = path_to_models)
+
+seurat.obj.smc_tumour <- classify_cells(classify_obj = smc_tumour, 
+                             assay = 'RNA', slot = 'data',
+                             cell_types = c_types,
+                             path_to_models = path_to_models)
+
+saveRDS(seurat.obj.smc_normal, file = "./Results/SMC/seurat.obj.smc_normal.RDS")
+saveRDS(seurat.obj.smc_tumour, file = "./Results/SMC/seurat.obj.smc_tumour.RDS")
+#seurat.obj.smc_normal <- readRDS("./Results/SMC/seurat.obj.smc_normal.RDS")
+#seurat.obj.smc_tumour <- readRDS("./Results/SMC/seurat.obj.smc_tumour.RDS")
+
+smc_normal_class <- seurat.obj.smc_normal[[]][, c(11:ncol(seurat.obj.smc_normal[[]]))]
+smc_normal_class
+
+smc_tumour_class <- seurat.obj.smc_tumour[[]][, c(11:ncol(seurat.obj.smc_tumour[[]]))]
+smc_tumour_class
+```
+
+```{r}
+Seurat::DimPlot(seurat.obj.smc_normal, group.by = "most_probable_cell_type")
+Seurat::DimPlot(seurat.obj.smc_tumour, group.by = "most_probable_cell_type")
+```
+
+```{r, fig.height=10,fig.width=20}
+Seurat::DimPlot(seurat.obj.smc_normal, group.by = "predicted_cell_type")
+Seurat::DimPlot(seurat.obj.smc_tumour, group.by = "predicted_cell_type")
+```
+
+
+```{r, fig.width=30, fig.height=20}
+# Visualize the cell types
+Seurat::DimPlot(seurat.obj.smc_normal, group.by = "predicted_cell_type",
+                split.by = "predicted_cell_type", ncol = 5) + NoLegend()
+
+Seurat::DimPlot(seurat.obj.smc_tumour, group.by = "predicted_cell_type",
+                split.by = "predicted_cell_type", ncol = 5) + NoLegend()
+```
+
+```{r, fig.width=30, fig.height=30}
+# Normal cells
+# Merge hybrid and confused states
+seurat.obj.smc_normal_alt <- seurat.obj.smc_normal
+Idents(seurat.obj.smc_normal_alt) <- seurat.obj.smc_normal_alt@meta.data$predicted_cell_type
+#levels(seurat.obj.smc_normal_alt)
+
+new_ident <- setNames(c("Differentiating cells","Differentiating cells",
+                        "Goblet cells","Stem-like/TA cells",
+                        "Intermediate cells","Differentiating cells",
+                        "Unknown","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Colonocytes",
+                        "Differentiating cells","Differentiating cells",
+                        "BEST4+ cells","Differentiating cells",
+                        "Confused cells","Differentiating cells",
+                        "Hybrid cells","Tuft cells",
+                        "Confused cells","Confused cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells"),
+                      levels(seurat.obj.smc_normal_alt))
+
+
+seurat.obj.smc_normal_alt <- RenameIdents(seurat.obj.smc_normal_alt, new_ident)
+
+my_levels <- c("Stem-like/TA cells","Intermediate cells",
+               "Colonocytes","BEST4+ cells","Goblet cells","Tuft cells","Differentiating cells",
+               "Hybrid cells","Confused cells","Unknown")
+
+# Relevel object@ident
+Idents(seurat.obj.smc_normal_alt) <- factor(Idents(seurat.obj.smc_normal_alt), levels = my_levels)
+seurat.obj.smc_normal_alt$orig.ident <- Idents(seurat.obj.smc_normal_alt)
+
+
+
+# Tumour cells
+# Merge hybrid and confused states
+seurat.obj.smc_tumour_alt <- seurat.obj.smc_tumour
+Idents(seurat.obj.smc_tumour_alt) <- seurat.obj.smc_tumour_alt@meta.data$predicted_cell_type
+#levels(seurat.obj.smc_tumour_alt)
+
+new_ident <- setNames(c("Stem-like/TA cells","Unknown",
+                        "Goblet cells","Intermediate cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","BEST4+ cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Colonocytes","Confused cells",
+                        "Confused cells","Differentiating cells",
+                        "Differentiating cells","Hybrid cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Confused cells",
+                        "Differentiating cells","Confused cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Confused cells",
+                        "Differentiating cells","Confused cells",
+                        "Differentiating cells","Tuft cells",
+                        "Confused cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Hybrid cells","Differentiating cells",
+                        "Differentiating cells"),
+                      levels(seurat.obj.smc_tumour_alt))
+
+
+seurat.obj.smc_tumour_alt <- RenameIdents(seurat.obj.smc_tumour_alt, new_ident)
+
+my_levels <- c("Stem-like/TA cells","Intermediate cells",
+               "Colonocytes","BEST4+ cells","Goblet cells","Tuft cells","Differentiating cells",
+               "Hybrid cells","Confused cells","Unknown")
+
+# Relevel object@ident
+Idents(seurat.obj.smc_tumour_alt) <- factor(Idents(seurat.obj.smc_tumour_alt), levels = my_levels)
+seurat.obj.smc_tumour_alt$orig.ident <- Idents(seurat.obj.smc_tumour_alt)
+```
+
+```{r, fig.height=5, fig.width=8}
+Seurat::DimPlot(seurat.obj.smc_normal_alt)
+Seurat::DimPlot(seurat.obj.smc_normal_alt, split.by = "orig.ident", ncol = 5) + NoLegend()
+
+Seurat::DimPlot(seurat.obj.smc_tumour_alt)
+Seurat::DimPlot(seurat.obj.smc_tumour_alt, split.by = "orig.ident", ncol = 5) + NoLegend()
+```
+
+```{r, fig.height=20, fig.width=20}
+markers_int <- read.table(file="./Results/Normal Cells/markers_int.txt")
+markers.to.plot <- markers_int[,1]
+#markers.to.plot <- unique(unlist(strsplit(markers.to.plot, " ")))
+
+DoHeatmap(seurat.obj.smc_normal_alt, features = markers.to.plot, assay = "RNA")
+DoHeatmap(seurat.obj.smc_tumour_alt, features = markers.to.plot, assay = "RNA")
+```
+
+```{r, fig.height=8, fig.width=20}
+markers.to.plot <- unique(unlist(strsplit(markers.to.plot, " ")))
+
+DotPlot(seurat.obj.smc_normal_alt, features = markers.to.plot,
+        #group.by = "predicted_cell_type",
+        dot.scale = 8, cols = c("blue","red")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+DotPlot(seurat.obj.smc_tumour_alt, features = markers.to.plot,
+        #group.by = "predicted_cell_type",
+        dot.scale = 8, cols = c("blue","red")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+
+```{r}
+df_class <- data.frame(Class = c(seurat.obj.smc_normal_alt$Class,seurat.obj.smc_tumour_alt$Class),
+                       Cell_Types = c(seurat.obj.smc_normal_alt$orig.ident, 
+                                      seurat.obj.smc_tumour_alt$orig.ident))
+
+df_class[,1] <- ifelse(df_class[,1] == "Tumor", "Tumour", df_class[,1])
+
+total_class <- plyr::count(df_class, vars = "Class")
+prct_class <- plyr::count(df_class, vars = c("Class","Cell_Types"))
+prct_class <- merge(prct_class,total_class, by = "Class")
+prct_class$Percentage <- (prct_class$freq.x / prct_class$freq.y) * 100
+
+ggplot(prct_class, aes(fill = Cell_Types, y = Percentage, x = Class)) + 
+    geom_bar(position="fill", stat="identity") 
+```
+
+```{r,fig.height=5,fig.width=5}
+df_class_normal <- data.frame(Class = c(seurat.obj.smc_normal_alt$Class),
+                       Cell_Types = c(seurat.obj.smc_normal_alt$orig.ident))
+
+df_class_normal[,1] <- ifelse(df_class_normal[,1] == "Tumor", "Tumour", df_class_normal[,1])
+
+total_class <- plyr::count(df_class_normal, vars = "Class")
+prct_class <- plyr::count(df_class_normal, vars = c("Class","Cell_Types"))
+prct_class <- merge(prct_class,total_class, by = "Class")
+prct_class$Percentage <- (prct_class$freq.x / prct_class$freq.y) * 100
+
+ggplot(prct_class, aes(fill = Cell_Types, y = Percentage, x = Class)) + 
+    geom_bar(position="fill", stat="identity") 
+```
+
+```{r,fig.height=5,fig.width=5}
+df_class_tumour <- data.frame(Class = c(seurat.obj.smc_tumour_alt$Class),
+                       Cell_Types = c(seurat.obj.smc_tumour_alt$orig.ident))
+
+df_class_tumour[,1] <- ifelse(df_class_tumour[,1] == "Tumor", "Tumour", df_class_tumour[,1])
+
+total_class <- plyr::count(df_class_tumour, vars = "Class")
+prct_class <- plyr::count(df_class_tumour, vars = c("Class","Cell_Types"))
+prct_class <- merge(prct_class,total_class, by = "Class")
+prct_class$Percentage <- (prct_class$freq.x / prct_class$freq.y) * 100
+
+ggplot(prct_class, aes(fill = Cell_Types, y = Percentage, x = Class)) + 
+    geom_bar(position="fill", stat="identity") 
+```
+
+```{r}
+df_conf <- data.frame(Class = c(seurat.obj.smc_normal_alt$Class,seurat.obj.smc_tumour_alt$Class),
+                      Cell_Types = c(seurat.obj.smc_normal_alt$orig.ident,
+                                      seurat.obj.smc_tumour_alt$orig.ident),
+                      scAnnotatR_Types = c(seurat.obj.smc_normal_alt$predicted_cell_type,
+                                      seurat.obj.smc_tumour_alt$predicted_cell_type))
+df_conf <- filter(df_conf, Cell_Types == "Confused cells")
+
+total_conf <- plyr::count(df_conf, vars = "Class")
+prct_conf <- plyr::count(df_conf, vars = c("Class","scAnnotatR_Types"))
+prct_conf <- merge(prct_conf,total_conf, by = "Class")
+prct_conf$Percentage <- (prct_conf$freq.x / prct_conf$freq.y) * 100
+
+ggplot(prct_conf, aes(fill = scAnnotatR_Types, y = Percentage, x = Class)) +
+    geom_bar(position="fill", stat="identity")
+```
+
+We want to calculate the percentage of each cell type per CMS.
+
+```{r}
+df_cms <- data.frame(CMS = seurat.obj.smc_tumour_alt$Cell_subtype,
+                     Cell_Types = seurat.obj.smc_tumour_alt$orig.ident)
+
+total_cms <- plyr::count(df_cms, vars = "CMS")
+prct_cms <- plyr::count(df_cms, vars = c("CMS","Cell_Types"))
+prct_cms <- merge(prct_cms,total_cms, by = "CMS")
+prct_cms$Percentage <- (prct_cms$freq.x / prct_cms$freq.y) * 100
+
+ggplot(prct_cms, aes(fill = Cell_Types, y = Percentage, x = CMS)) + 
+    geom_bar(position="fill", stat="identity") 
+```
+
+Check in some of the unknown cells are EECs.
+
+```{r, fig.height=8, fig.width=10}
+eec_markers <- c("CHGA","CHGB","NEUROD1","NEUROG3")
+
+unknown_normal <- subset(seurat.obj.smc_normal_alt, ident = "Unknown")
+unknown_tumour <- subset(seurat.obj.smc_tumour_alt, ident = "Unknown")
+  
+FeaturePlot(unknown_normal, features = eec_markers, ncol = 2)
+FeaturePlot(unknown_tumour, features = eec_markers, ncol = 2)
+```
+
+

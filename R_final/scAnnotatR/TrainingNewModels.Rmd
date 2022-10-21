@@ -1,0 +1,412 @@
+---
+title: "Training New Classification Models"
+author: "Francisca Xara-Brasil"
+output: html_notebook
+---
+
+Tutorial: https://github.com/grisslab/scAnnotatR/blob/master/vignettes/training-basic-model.Rmd
+
+
+# Preparing train object and test object
+
+To start the training workflow, we first install and load the necessary libraries. 
+
+```{r, eval = FALSE}
+# use BiocManager to install from Bioconductor
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+# the scAnnotatR package
+if (!require(scAnnotatR))
+  BiocManager::install("scAnnotatR")
+# we use the scRNAseq package to load example data
+# if (!require(scRNAseq))
+#   BiocManager::install("scRNAseq")
+```
+
+```{r}
+dir <- choose.dir() #Select file "R_final"
+setwd(dir)
+
+library(scAnnotatR)
+```
+
+First, we load the dataset that will be used for training (data from normal epithelial cells).
+
+```{r}
+ep_normal <- readRDS(file = paste0(dir,"/scAnnotatR/ep_normal_final.RDS"))
+```
+
+We split this dataset into two parts, one for the training and the other for the testing.
+
+```{r}
+pivot <- ncol(ep_normal)%/%2
+train_set <- ep_normal[, 1:pivot]
+test_set <- ep_normal[, (1+pivot):ncol(ep_normal)]
+```
+
+
+We want to train a classifier for each epithelial cell type (6 classifiers in total).
+
+Considering, for instance, the Stem-like/TA cell classifier, we label all the cells that are not from that type as "others".
+
+```{r}
+# change cell label
+train_set$Stem <- unlist(lapply(Idents(ep_normal),
+                                  function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Stem_TA cells')) {'Stem_TA cells'} else {'others'}))
+test_set$Stem <- unlist(lapply(Idents(ep_normal),
+                                 function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Stem_TA cells')) {'Stem_TA cells'} else {'others'}))
+
+
+train_set$Intermediate <- unlist(lapply(Idents(ep_normal),
+                                  function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Intermediate cells')) {'Intermediate cells'} else {'others'}))
+test_set$Intermediate <- unlist(lapply(Idents(ep_normal),
+                                 function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Intermediate cells')) {'Intermediate cells'} else {'others'}))
+
+
+train_set$Colonocyte <- unlist(lapply(Idents(ep_normal),
+                                  function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Colonocytes')) {'Colonocytes'} else {'others'}))
+test_set$Colonocyte <- unlist(lapply(Idents(ep_normal),
+                                 function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Colonocytes')) {'Colonocytes'} else {'others'}))
+
+
+train_set$BEST4 <- unlist(lapply(Idents(ep_normal),
+                                  function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('BEST4 cells')) {'BEST4 cells'} else {'others'}))
+test_set$BEST4 <- unlist(lapply(Idents(ep_normal),
+                                 function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('BEST4 cells')) {'BEST4 cells'} else {'others'}))
+
+
+train_set$Goblet <- unlist(lapply(Idents(ep_normal),
+                                  function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Goblet cells')) {'Goblet cells'} else {'others'}))
+test_set$Goblet <- unlist(lapply(Idents(ep_normal),
+                                 function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Goblet cells')) {'Goblet cells'} else {'others'}))
+
+
+train_set$Tuft <- unlist(lapply(Idents(ep_normal),
+                                  function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Tuft cells')) {'Tuft cells'} else {'others'}))
+test_set$Tuft <- unlist(lapply(Idents(ep_normal),
+                                 function(x) if (is.na(x)) {'ambiguous'} else if (x %in% c('Tuft cells')) {'Tuft cells'} else {'others'}))
+```
+
+We may want to check the number of cells in each category:
+
+```{r}
+table(train_set$Stem)
+table(test_set$Stem)
+table(train_set$Intermediate)
+table(test_set$Intermediate)
+table(train_set$Colonocyte)
+table(test_set$Colonocyte)
+table(train_set$BEST4)
+table(test_set$BEST4)
+table(train_set$Goblet)
+table(test_set$Goblet)
+table(train_set$Tuft)
+table(test_set$Tuft)
+```
+
+
+
+# Setting marker genes
+
+Next, we set the marker genes of each cell type (previously determined), which will be used for training the respective classification model. 
+
+```{r}
+markers_int <- read.table(file=paste0(dir,"/Results/Normal Cells/markers_int.txt"))
+
+Stem_markers <- dplyr::filter(markers_int, Cell_Types == "Stem-like/TA cells")[,1]
+Intermediate_markers <- dplyr::filter(markers_int, Cell_Types == "Intermediate cells")[,1]
+Colonocytes_markers <- dplyr::filter(markers_int, Cell_Types == "Colonocytes")[,1]
+BEST4_markers <- dplyr::filter(markers_int, Cell_Types == "BEST4+ cells")[,1]
+Goblet_markers <- dplyr::filter(markers_int, Cell_Types == "Goblet cells")[,1]
+Tuft_markers <- dplyr::filter(markers_int, Cell_Types == "Tuft cells")[,1]
+```
+
+
+
+# Train model
+
+When the model is being trained, three pieces of information must be 
+provided: 
+
+  * the Seurat object used for training
+  * the set of applied marker genes
+  * the cell type defining the trained model
+
+In case the dataset does not contain any cell classified as the target
+cell type, the function will fail.  
+
+When training on an imbalanced dataset (f.e. a dataset containing 90% Stem cells and
+only very few other cell types), the trained model may bias toward the 
+majority group and ignore the presence of the minority group. To avoid this, 
+the number of positive cells and negative cells will be automatically balanced 
+before training. Therefore, a smaller number cells will be randomly picked  
+from the majority group. To use the same set of cells while training multiple 
+times for one model, users can use `set.seed`. 
+
+```{r}
+set.seed(123)
+classifier_Stem <- train_classifier(train_obj = train_set, cell_type = "Stem_TA cells", 
+                                 marker_genes = Stem_markers,
+                                 assay = 'RNA', slot = "data",
+                                 tag_slot = 'active.ident')
+
+classifier_Intermediate <- train_classifier(train_obj = train_set,
+                                 cell_type = "Intermediate cells", 
+                                 marker_genes = Intermediate_markers,
+                                 assay = 'RNA', slot = "data",
+                                 tag_slot = 'active.ident')
+
+classifier_Colonocyte <- train_classifier(train_obj = train_set,
+                                 cell_type = "Colonocytes", 
+                                 marker_genes = Colonocytes_markers,
+                                 assay = 'RNA', slot = "data",
+                                 tag_slot = 'active.ident')
+
+classifier_BEST4 <- train_classifier(train_obj = train_set,
+                                 cell_type = "BEST4 cells", 
+                                 marker_genes = BEST4_markers,
+                                 assay = 'RNA', slot = "data",
+                                 tag_slot = 'active.ident')
+
+classifier_Goblet <- train_classifier(train_obj = train_set, cell_type = "Goblet cells", 
+                                 marker_genes = Goblet_markers,
+                                 assay = 'RNA', slot = "data",
+                                 tag_slot = 'active.ident')
+
+classifier_Tuft <- train_classifier(train_obj = train_set, cell_type = "Tuft cells", 
+                                 marker_genes = Tuft_markers,
+                                 assay = 'RNA', slot = "data",
+                                 tag_slot = 'active.ident')
+```
+
+
+```{r}
+classifier_Stem
+classifier_Intermediate
+classifier_Colonocyte
+classifier_BEST4
+classifier_Goblet
+classifier_Tuft
+```
+
+The classification model is a `scAnnotatR` object. 
+Details about the classification model are accessible via getter methods. 
+
+For example:
+
+```{r}
+caret_model(classifier_Stem)
+caret_model(classifier_Intermediate)
+caret_model(classifier_Colonocyte)
+caret_model(classifier_BEST4)
+caret_model(classifier_Goblet)
+caret_model(classifier_Tuft)
+```
+
+
+
+# Test model
+
+The `test_classifier` model automatically tests a classifier's performance
+against another dataset. Here, we used the `test_set` created before:
+
+```{r}
+print("Stem/TA")
+classifier_Stem_test <- test_classifier(classifier = classifier_Stem,
+                                        test_obj = test_set,
+                                        assay = 'RNA', slot = "data",
+                                        tag_slot = 'active.ident')
+
+print("Intermediate")
+classifier_Intermediate_test <- test_classifier(classifier = classifier_Intermediate,
+                                        test_obj = test_set,
+                                        assay = 'RNA', slot = "data",
+                                        tag_slot = 'active.ident')
+
+print("Colonocyte")
+classifier_Colonocyte_test <- test_classifier(classifier = classifier_Colonocyte,
+                                        test_obj = test_set,
+                                        assay = 'RNA', slot = "data",
+                                        tag_slot = 'active.ident')
+
+print("BEST4")
+classifier_BEST4_test <- test_classifier(classifier = classifier_BEST4,
+                                        test_obj = test_set,
+                                        assay = 'RNA', slot = "data",
+                                        tag_slot = 'active.ident')
+                                  
+print("Goblet")
+classifier_Goblet_test <- test_classifier(classifier = classifier_Goblet,
+                                        test_obj = test_set,
+                                        assay = 'RNA', slot = "data",
+                                        tag_slot = 'active.ident')
+
+print("Tuft")
+classifier_Tuft_test <- test_classifier(classifier = classifier_Tuft,
+                                        test_obj = test_set,
+                                        assay = 'RNA', slot = "data",
+                                        tag_slot = 'active.ident')
+
+```
+
+
+## Interpreting test model result
+
+Apart from the output exported to console, test classifier function also returns an object, which is a list of:
+  
+  * **test_tag**: actual cell label, this can be different from the label provided by users because of ambiguous characters or the incoherence in cell type and sub cell type label assignment.  
+
+  * **pred**: cell type prediction using current classifier
+
+  * **acc**: prediction accuracy at the fixed probability threshold, the probability threshold value can also be queried using *p_thres(classifier)*
+
+  * **auc**: AUC score provided by current classifier
+  
+  * **overall_roc**: True Positive Rate and False Positive Rate with a certain number of prediction probability thresholds
+  
+Every classifier internally consists of a trained SVM and a probability threshold. Only cells that are classified with a probability exceeding this threshold are classified as the respective cell type. The *overall_roc* slot summarizes the True Positive Rate (sensitivity) and False Positive Rate (1 - specificity) obtained by the trained model according to different thresholds.
+
+```{r}
+print("Stem/TA")
+classifier_Stem_test$overall_roc
+classifier_Stem_test$auc
+
+print("Intermediate")
+classifier_Intermediate_test$overall_roc
+classifier_Intermediate_test$auc
+
+print("Colonocytes")
+classifier_Colonocyte_test$overall_roc
+classifier_Colonocyte_test$auc
+
+print("BEST4")
+classifier_BEST4_test$overall_roc
+classifier_BEST4_test$auc
+
+print("Goblet")
+classifier_Goblet_test$overall_roc
+classifier_Goblet_test$auc
+
+print("Tuft")
+classifier_Tuft_test$overall_roc
+classifier_Tuft_test$auc
+```
+
+The default probability threshold is 0.5. The higher sensitivity can be reached if we set the p_thres at 0.4. However, we will then have lower specificity, which means that we will incorrectly classify some cells as, for example, stem cells. At the same time, we may not retrieve all actual stem cells with higher p_thres (0.6, for example).
+
+There is of course a certain trade-off between the sensitivity and the specificity of the model. Depending on the need of the project or the user-own preference, a probability threshold giving higher sensitivity or higher specificity can be chosen.
+
+Since we want to guarantee that a low number of cells are misclassified rather than detecting all positive cells (we are more interested in high specificity rather than high sensitivity), we select, for each model, the lowest probability threshold with an associated FPR below 0.1.
+
+```{r}
+#p_thres(classifier_Stem) <- 0.6
+p_thres(classifier_Intermediate) <- 0.4
+p_thres(classifier_Colonocyte) <- 0.7
+p_thres(classifier_BEST4) <- 0.4
+#p_thres(classifier_Goblet) <- 0.3
+#p_thres(classifier_Tuft) <- 0.5
+```
+
+
+
+## Plotting ROC curve
+
+Apart from numbers, scAnnotatR also provide a method to plot the ROC curve. 
+
+```{r}
+roc_curve_Stem <- plot_roc_curve(test_result = classifier_Stem_test) +
+             labs(title = "Stem-like/TA cells")
+
+roc_curve_Intermediate <- plot_roc_curve(test_result = classifier_Intermediate_test) +
+             labs(title = "Intermediate cells")
+
+roc_curve_Colonocyte <- plot_roc_curve(test_result = classifier_Colonocyte_test) +
+             labs(title = "Colonocytes")
+
+roc_curve_BEST4 <- plot_roc_curve(test_result = classifier_BEST4_test) +
+             labs(title = "BEST4+ cells")
+
+roc_curve_Goblet <- plot_roc_curve(test_result = classifier_Goblet_test) +
+             labs(title = "Goblet cells")
+
+roc_curve_Tuft <- plot_roc_curve(test_result = classifier_Tuft_test) +
+             labs(title = "Tuft cells")
+```
+
+
+```{r, fig.height=6, fig.width=10}
+(roc_curve_Stem + roc_curve_Intermediate + roc_curve_Colonocyte) /
+(roc_curve_BEST4 + roc_curve_Goblet + roc_curve_Tuft)
+```
+
+
+
+## Which model to choose?
+
+Changes in the training data, in the set of marker genes and in the prediction 
+probability threshold will all lead to a change in model performance.
+
+There are several ways to evaluate the trained model, including the overall 
+accuracy, the AUC score and the sensitivity/specificity of the model when 
+testing on an independent dataset.
+
+*Tip: Using more general markers of the whole population leads to higher 
+sensitivity. This sometimes produces lower specificity because of close 
+cell types. While training some models, 
+we observed that we can use the markers producing high sensitivity but at 
+the same time can improve the specificity by increasing the probability 
+threshold. Of course, this can only applied in some cases, because 
+some markers can even have a larger affect on the specificity than the 
+prediction probability threshold.*
+
+
+
+# Save classification model for further use
+
+New classification models can be stored using the `save_new_model` function:
+
+```{r}
+save_new_model(new_model = classifier_Stem,
+               path_to_models = paste0(dir,"/scAnnotatR"),
+               include.default = FALSE)
+
+save_new_model(new_model = classifier_Intermediate,
+               path_to_models = paste0(dir,"/scAnnotatR"),
+               include.default = FALSE)
+
+save_new_model(new_model = classifier_Colonocyte,
+               path_to_models = paste0(dir,"/scAnnotatR"),
+               include.default = FALSE)
+
+save_new_model(new_model = classifier_BEST4,
+               path_to_models = paste0(dir,"/scAnnotatR"),
+               include.default = FALSE)
+
+save_new_model(new_model = classifier_Goblet,
+               path_to_models = paste0(dir,"/scAnnotatR"),
+               include.default = FALSE)
+
+save_new_model(new_model = classifier_Tuft,
+               path_to_models = paste0(dir,"/scAnnotatR"),
+               include.default = FALSE)
+```
+
+
+Parameters:
+
+  * **new_model**: The new model that should be added to the database in the
+                   specified directory.
+  * **path_to_models**: The directory where the new models should be stored.
+  * **include.default**: If set, the default models shipped with the package
+                         are added to the database.
+
+Users can also choose whether copy all pretrained models of the packages to the
+new model database. If not, in the future, user can only choose to use either 
+default pretrained models or new models by specifying only one path to models.
+
+Models can be deleted from the model database using the `delete_model` function:
+
+```{r}
+# delete the "Intermediate cells" model from the new database
+delete_model("Intermediate", path_to_models = paste0(dir,"/scAnnotatR"))
+```

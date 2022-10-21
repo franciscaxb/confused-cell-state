@@ -1,0 +1,911 @@
+---
+title: "KUL3 Dataset Analysis - Normal Cells"
+author: "Francisca Xara-Brasil"
+output: html_notebook
+---
+
+Tutorials: https://github.com/quadbiolab/scRNAseq_analysis_vignette/blob/master/Tutorial.md
+           https://satijalab.org/seurat/articles/pbmc3k_tutorial.html
+
+
+
+# General
+
+Load necessary libraries.
+
+```{r}
+dir <- choose.dir() #Select file "R_final"
+
+setwd(dir) # Set working directory to dir - must be run in console
+
+# Data manipulation
+library(Seurat)
+library(SeuratObject)
+#library(SeuratData) # devtools::install_github('satijalab/seurat-data')
+library(data.table)
+library(Matrix)
+library(DropletUtils) #BiocManager::install("DropletUtils")
+library(dplyr)
+#library(presto)
+
+
+# Gene set enrichment
+#library(gprofiler2)
+
+# Plotting
+library(ggplot2)
+library(patchwork)
+#library(gplots)
+#library(cowplot)
+library(VennDiagram)
+
+set.seed(1)
+
+#memory.limit(size = 70000)
+```
+
+
+
+# 1. Standard Analyses
+
+## 1.1. Create a Seurat Object
+
+The data were obtained from: 
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE144735
+The data were not correctly formatted for Read10x function, so additional steps had to be performed once, following instructions here: https://www.biostars.org/p/449217/
+
+```{r}
+data_dir <- "./Data/"
+
+# Data have gene names as rows, and sample names/indexes as columns
+#data <- fread(paste0(data_dir, "/GSE144735_processed_KUL3_CRC_10X_raw_UMI_count_matrix.txt.gz"))
+#head(data[,1:10])
+#sparse.mat <- Matrix(as.matrix(data[, -1, with=FALSE]), sparse=TRUE)
+#DropletUtils::write10xCounts(paste0(data_dir, "GSE144735"), x = sparse.mat, gene.id= data$Index)
+#cr_cancer.data <- DropletUtils::read10xCounts(paste0(data_dir, "GSE144735"), col.names=TRUE)
+
+cr_cancer.data <- Read10X(data.dir = paste0(data_dir, "GSE144735_KUL3/"))
+dim(cr_cancer.data)
+```
+
+First, we will create a Seurat Object that we will be working with.
+
+Some extra options are added to the CreateSeuratObject function, such as min.cells and min.features. When these two parameters are set, an initial filtering is applied to the data, removing right from the beginning all genes with reads detected in too few cells, as well as cells with too few genes detected. We chose to keep all genes (i.e. default or min.cells = 0 and min.features = 0) in this step and filter the data later.
+
+```{r}
+# We will be using gene names instead of gene IDs for this analysis. Because the same gene name may be assigned to different genes, we first need to join them by summing their counts
+#cr_cancer.data = rowsum(as.matrix(cr_cancer.data), group = rownames(cr_cancer.data)) #Takes time
+#dim(cr_cancer.data) # Dim was the same - no duplicated genes
+
+# Metadata table has sample names/indexes as rows and variables (eg. patient, sample) as columns
+metadata_table <- fread(file = paste0(data_dir, "GSE144735_processed_KUL3_CRC_10X_annotation.txt.gz"))
+rownames(metadata_table) <- metadata_table$Index
+
+# Initialise the Seurat Object with the raw (non-normalized data)
+cr_cancer <- CreateSeuratObject(counts = cr_cancer.data, project = "cr_cancer", meta.data = metadata_table)
+cr_cancer
+
+saveRDS(cr_cancer, file = "./Results/cr_cancer.RDS")
+#cr_cancer <- readRDS("./Results/cr_cancer.RDS")
+```
+
+In this Notebook, we will only analyse "normal" cells. 
+
+```{r}
+cr_normal <- subset(cr_cancer, subset = Class == "Normal")
+
+dim(cr_normal)
+```
+
+
+
+## 1.2. Quality Control
+
+Get % of reads coming from MT transcripts. In most species, these can be inferred either by their gene name ("MT-" in human, "mt-" in mouse, etc.) or by finding if the gene is encoded in the mitochondrial chromosome.
+
+```{r}
+cr_normal <- PercentageFeatureSet(cr_normal, col.name = "percent.mt", pattern = "^MT-")
+```
+
+Visualise QC metrics as violin plots. Note that data was previously filtered by Lee et al. (2020): cells with >1000 UMI counts; >200 genes and <6000 genes;
+and <20% of mitochondrial gene expression in UMI counts.
+
+```{r, fig.width=10, fig.height=5}
+VlnPlot(cr_normal, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"))
+```
+
+Visualise QC metrics as scatterplots, illustrating feature-feature relationships.
+
+```{r, fig.width=15, fig.height=5}
+plot1 <- FeatureScatter(cr_normal, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(cr_normal, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+(plot1 + plot2)
+```
+
+Although we tested more filters, we concluded that the thresholds used by Lee et al. (2020) were good enough, based on the previous plots. Then, we decided not to remove any more cells.
+
+Save Seurat Objects.
+
+```{r}
+cr_normal_filt <- cr_normal
+
+saveRDS(cr_normal_filt, file = "./Results/Normal Cells/cr_normal_filt.RDS")
+
+# cr_normal_filt <- readRDS("./Results/Normal Cells/cr_normal_filt.RDS")
+```
+
+
+
+## 1.3. Normalisation
+
+A normalisation step is necessary, in order to make gene expression levels between different cells comparable.
+
+The gene counts for each cell are divided by the total counts for that cell, and then multiplied by a scale factor 10000. After that, the resulting expression levels undergo a log-transformation, so that the expression values better fit a normal distribution.
+
+```{r}
+cr_normal_filt <- NormalizeData(cr_normal_filt, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+
+
+## 1.4. Highly Variable Genes Selection
+
+When analysing scRNA-seq data, not every gene has the same contribution or level of information for the identification of distinct cell groups. Thereby, it is important to perform an appropriate selection of highly variable features, i.e. genes with the most varied expression levels across cells, before further exploring the data.
+
+By default, Seurat calculates the standardised variance of each gene across cells, and then selects the top 2000 ones as the highly variable genes (HVGs).
+
+```{r}
+cr_normal_filt <- FindVariableFeatures(cr_normal_filt, selection.method = "vst", nfeatures = 2000)
+```
+
+We can check what are the HVG.
+
+```{r, fig.width=10, fig.height=5}
+top_features <- head(VariableFeatures(cr_normal_filt), 15)
+plot1 <- VariableFeaturePlot(cr_normal_filt)
+plot2 <- LabelPoints(plot = plot1, points = top_features, repel = TRUE)
+
+plot2
+```
+
+
+
+## 1.5. Data scaling
+
+Scaling is a linear transformation that:
+(1) shifts the expression of each gene, so that the mean expression across cells is 0;
+(2) scales the expression of each gene, so that the variance across cells is 1 (this gives equal weight in downstream analyses, so that highly-expressed genes are not dominant).
+
+```{r}
+all.genes <- rownames(cr_normal_filt)
+
+cr_normal_filt <- ScaleData(cr_normal_filt, features = all.genes)
+```
+
+
+
+## 1.6. Dimensionality Reduction using PCA
+
+Seurat uses truncated PCA to only calculate the first PCs, by default the top 50 PCs.
+
+```{r}
+cr_normal_filt <- RunPCA(cr_normal_filt, npcs = 50)
+```
+
+We can plot it to see its general shape.
+
+```{r}
+DimPlot(cr_normal_filt, reduction = "pca", dims = c(1,2))
+```
+
+The elbow plot method was used to determine the number of relevant PCs. It consists of plotting the standard deviation as a function of each PC, and picking the elbow of the curve as the number of PCs to use. We selected the first 20 PCs.
+
+```{r}
+ElbowPlot(cr_normal_filt, ndims = 50)
+```
+
+
+
+## 1.7. Dimensionality Reduction using UMAP (and t-SNE)
+
+We can run UMAP using the chosen top PCs.
+
+```{r}
+ncomp <- 20
+
+cr_normal_filt <- RunUMAP(cr_normal_filt, dims = 1:ncomp, verbose = F)
+cr_normal_filt <- RunTSNE(cr_normal_filt, dims = 1:ncomp, verbose = F)
+```
+
+Just to see how UMAP looks.
+
+```{r}
+DimPlot(cr_normal_filt, reduction = "umap", group.by = "Class")
+DimPlot(cr_normal_filt, reduction = "umap", group.by = "Patient")
+DimPlot(cr_normal_filt, reduction = "umap", split.by = "Patient", ncol = 3)
+```
+
+See how t-SNE looks.
+
+```{r}
+DimPlot(cr_normal_filt, reduction = "tsne", group.by = "Class")
+DimPlot(cr_normal_filt, reduction = "tsne", group.by = "Patient")
+DimPlot(cr_normal_filt, reduction = "tsne", split.by = "Patient", ncol = 3)
+```
+
+Since the data comes from different patients, one could be in the presence of batch effects. However, analysing the previous plots, it seems that there is no batch effect or, if present, it is small (the cells from all patients seem to be overlapping). Then, data integration is not necessary.
+
+
+Save.
+
+```{r}
+saveRDS(cr_normal_filt, file = "./Results/Normal Cells/cr_normal_filt_2.RDS")
+
+# cr_normal_filt <- readRDS("./Results/Normal Cells/cr_normal_filt_2.RDS")
+```
+
+
+
+## 1.8. Clustering
+
+We can use the chosen PCs to get a neighbourhood graph for all cells.
+
+```{r}
+red = "pca"
+
+cr_normal_filt <- FindNeighbors(cr_normal_filt, dims = 1:ncomp,
+                           reduction = red, graph.name = paste0(red, ncomp))
+```
+
+This allows us to detect clusters of cells to then be interpreted. We are using the default Louvain algorithm, and we are getting clusters for multiple resolutions between 0.2 and 1.1.
+
+```{r}
+cr_normal_filt <- FindClusters(cr_normal_filt, verbose = F,
+                         graph.name = paste0(red, ncomp),
+                         resolution = seq(0.2, 1.1, 0.1))
+
+# Setting a more sensible identity as default
+cr_normal_filt <- SetIdent(cr_normal_filt, value = paste0(red, ncomp, "_res.0.5"))
+```
+
+And so we can have a look at all clustering resolutions.
+    
+```{r, fig.width=14, fig.height=20}
+plt_list <- list()
+for(cl in colnames(cr_normal_filt@meta.data)[grepl("pca20_", colnames(cr_normal_filt@meta.data))]){
+  cr_normal_filt <- SetIdent(cr_normal_filt, value = cl)
+  plt_list[[cl]] <- DimPlot(cr_normal_filt, reduction = "umap", label = T, raster = T)+
+    labs(subtitle = cl)+
+    theme(legend.position = "none", aspect.ratio = 1)
+}
+
+print(cowplot::plot_grid(plotlist = plt_list, ncol = 3))
+
+```
+
+We want to define a resolution of 0.2 for further analyses.
+
+```{r}
+# Setting identities according to the previous plots
+cr_normal_filt <- SetIdent(cr_normal_filt, value = paste0(red, ncomp, "_res.0.2"))
+
+# Define an order of cluster identities
+my_levels <- c("0","1","2","3","4","5","6","7","8","9","10","11","12")
+
+# Relevel object@ident
+Idents(cr_normal_filt) <- factor(Idents(cr_normal_filt), levels = my_levels)
+
+DimPlot(cr_normal_filt, reduction = "umap", label = T, raster = T) + NoLegend()
+```
+
+Save.
+
+```{r}
+saveRDS(cr_normal_filt, file = "./Results/Normal Cells/cr_normal_filt_3.RDS")
+
+# cr_normal_filt <- readRDS("./Results/Normal Cells/cr_normal_filt_3.RDS")
+
+```
+
+
+
+## 1.9. Identificaion and Selection of Epithelial Cells
+
+we are interested in analysing epithelial cells so, to identify them, we used two different approaches.
+
+For the first approach, we want to check the expression of some canonical epithelial cell type markers, according to literature (Lee et al., Li et al. and Khaliq et al.).
+
+
+```{r, fig.width=15, fig.height=8}
+ep_markers <- c("EPCAM", "VIL1", "KRT20", "CLDN7", "CDH1", "KRT18")
+
+FeaturePlot(cr_normal_filt, features = ep_markers, reduction = "umap", ncol = 3)
+```
+
+```{r, fig.width=15, fig.height=7}
+DoHeatmap(cr_normal_filt, features = ep_markers)
+```
+
+For the second approach, we want to determine the marker genes of each cell cluster and, based on that, do literature search for annotation.
+
+Because of the nature of large sample size in scRNA-seq data (one cell is one sample), it is strongly recommended to not only look at p-values, but also detection rate of the gene in the cluster (pct) and fold change (log2fc) between cells in and outside the cluster. That is why we set min.pct=0.25 and logfc.threshold=1.5 in the function to require threshold on the effect size.
+
+```{r}
+cl_markers <- FindAllMarkers(cr_normal_filt, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 1.5, verbose = FALSE)
+
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+top10_cl_markers
+```
+
+```{r, fig.width=15, fig.height=18}
+DoHeatmap(cr_normal_filt, features = top10_cl_markers$gene)
+```
+
+It seems that cells in cluster 3 correspond to epithelial cells.
+
+We decided to double check our results by comparing them to the classification performed and by Lee et al. (2020).
+
+```{r, fig.width=15, fig.height=5}
+cr_normal_filt_alt <- cr_normal_filt
+
+new_ident <- setNames(c("0","1","2","Epithelial cells","4","5","6","7","8","9","10","11","12"),
+                      levels(cr_normal_filt_alt))
+
+cr_normal_filt_alt <- RenameIdents(cr_normal_filt_alt, new_ident)
+
+plot1 <- DimPlot(cr_normal_filt_alt, reduction = "umap", label = T, raster = T) + NoLegend() +
+  labs(title = "Annotation according to this work") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot2 <- DimPlot(cr_normal_filt, reduction = "umap", label = T, raster = T, group.by = "Cell_type") + NoLegend() + labs(title = "Annotation according to Lee et al. (2020)")
+
+plot1+plot2
+```
+
+To remove cells with an ambiguous identity, we ended up by selecting only the ones in the intersection of our approach with Lee et al. (2020) approach.
+
+```{r}
+ep_normal <- subset(cr_normal_filt, idents = c("3"), subset = Cell_type == "Epithelial cells")
+
+dim(ep_normal)
+```
+
+Save.
+
+```{r}
+saveRDS(ep_normal, file = "./Results/Normal Cells/ep_normal.RDS")
+
+# ep_normal <- readRDS("./Results/Normal Cells/ep_normal.RDS")
+```
+
+
+
+# 2. Exploratory Analyses with Epithelial Cells
+
+Before starting the exploratory analyses with epithelial cells, we need to repeat some of the previous steps, because it is possible that the initial set of HVGs and PCs, calculated using all cells, does not reflect the variability across the subset of epithelial cells.
+
+```{r}
+ep_normal <- FindVariableFeatures(ep_normal, selection.method = "vst",
+                                  nfeatures = 3000)
+ep_normal <- ScaleData(ep_normal, features = rownames(ep_normal))
+ep_normal <- RunPCA(ep_normal, npcs = 50)
+ep_normal <- RunUMAP(ep_normal, dims = 1:20)
+```
+
+```{r}
+red <- "pca"
+ncomp <- 20
+ep_normal <- FindNeighbors(ep_normal, dims = 1:ncomp,
+                           reduction = red, graph.name = paste0(red, ncomp))
+
+ep_normal <- FindClusters(ep_normal, verbose = F,
+                         graph.name = paste0(red, ncomp),
+                         resolution = seq(0.2, 1.1, 0.1))
+
+# Setting a more sensible identity as default
+ep_normal <- SetIdent(ep_normal, value = paste0(red, ncomp, "_res.0.5"))
+```
+
+```{r, fig.width=14, fig.height=20}
+plt_list <- list()
+for(cl in colnames(ep_normal@meta.data)[grepl("pca20_", colnames(ep_normal@meta.data))]){
+  ep_normal <- SetIdent(ep_normal, value = cl)
+  plt_list[[cl]] <- DimPlot(ep_normal, reduction = "umap",
+                            label = T, raster = T)+
+    labs(subtitle = cl)+
+    theme(legend.position = "none", aspect.ratio = 1)
+  }
+print(cowplot::plot_grid(plotlist = plt_list, ncol = 3))
+```
+
+```{r}
+# Setting identity according to the previous plots
+ep_normal <- SetIdent(ep_normal, value = paste0(red, ncomp, "_res.0.5"))
+
+DimPlot(ep_normal, reduction = "umap", label = T, raster = T) + NoLegend()
+DimPlot(ep_normal, reduction = "umap", split.by = "Patient",
+        ncol = 3, label = T, raster = T) + NoLegend()
+DimPlot(ep_normal, reduction = "umap", group.by = "Patient",
+        label = F, raster = T)
+DimPlot(ep_normal, reduction = "umap", group.by = "Cell_subtype", raster = T) +
+  labs(title = "Classification according to Lee et al.")
+```
+
+Save.
+
+```{r}
+saveRDS(ep_normal, file = "./Results/Normal Cells/ep_normal_2.RDS")
+#ep_normal <- readRDS("./Results/Normal Cells/ep_normal_2.RDS")
+```
+
+
+## 2.1. Annotation and Connectivity Analysis of Normal Epithelial Cell Types
+
+### Annotation of Normal Epithelial Cells
+
+Since the literature is a bit ambiguous regarding the canonical markers of the different epithelial cell types, we decided to use only an unbiased approach to perform the annotation of these cells.
+
+```{r, fig.height=12, fig.width=15}
+ep_normal_markers <- FindAllMarkers(ep_normal, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.5, verbose = FALSE)
+
+top10_ep_normal_markers <- ep_normal_markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+DoHeatmap(ep_normal, features = top10_ep_normal_markers$gene)
+```
+
+After analysing the expression of different markers and comparing to literature, we can annotate the clusters.
+
+```{r}
+new_ident <- setNames(c("Intermediate cells",
+                        "Stem-like/TA cells",
+                        "Stem-like/TA cells",
+                        "Goblet cells",
+                        "Colonocytes",
+                        "Stem-like/TA cells",
+                        "Colonocytes",
+                        "BEST4+ cells",
+                        "Goblet cells",
+                        "Tuft cells"),
+                      levels(ep_normal))
+
+ep_normal <- RenameIdents(ep_normal, new_ident)
+ep_normal$Cell_class <- Idents(ep_normal)
+
+# Define an order of cluster identities
+my_levels <- c("Stem-like/TA cells","Intermediate cells","Colonocytes","BEST4+ cells",
+               "Goblet cells","Tuft cells")
+
+# Relevel object@ident
+Idents(ep_normal) <- factor(Idents(ep_normal), levels = my_levels)
+
+
+DimPlot(ep_normal, reduction = "umap", label = FALSE)
+DimPlot(ep_normal, reduction = "umap", label = FALSE, split.by = "Patient", ncol = 3)
+```
+
+Save.
+
+```{r}
+saveRDS(ep_normal, file = "./Results/Normal Cells/ep_normal_3.RDS")
+#ep_normal <- readRDS("./Results/Normal Cells/ep_normal_3.RDS")
+```
+
+
+
+### Conectivity Analysis with PAGA
+
+To evaluate how different cell types are connected with each other and to understand potential developmental relationships, we will use PAGA, which is included as part of the scanpy toolkit in Python.
+
+As scanpy is a python package and does not support a Seurat object as the input, we need to store its information in a format that scanpy supports. We will use the anndata package to create a h5ad file with the information needed (e.g. PCA, UMAP, and cell type annotation).
+
+```{r}
+library(anndata) #install.packages("anndata")
+adata <- AnnData(X = t(as.matrix(ep_normal[['RNA']]@data)),
+                 obs = data.frame(celltype = ep_normal@active.ident,
+                                  row.names = colnames(ep_normal)),
+                 var = ep_normal[['RNA']]@meta.features,
+                 layers = list(counts = t(as.matrix(ep_normal[['RNA']]@counts))),
+                 obsm = list(pca = Embeddings(ep_normal,"pca")[,1:20],
+                             umap = Embeddings(ep_normal,"umap"))
+                )
+adata$write_h5ad("./Results/Normal Cells/ep_normal_anndata_obj.h5ad")
+```
+
+Next, we need to swtich to Python (>=3.6). To stay in R, we will use the reticulate R package, which provides an interface to Python.
+
+```{r}
+library(reticulate)
+py_install("scanpy", pip=T)
+sc <- import("scanpy")
+```
+
+PAGA analysis, using the results previously obtained with Seurat.
+
+```{r}
+adata_ep_normal <- sc$read("./Results/Normal Cells/ep_normal_anndata_obj.h5ad") # load the h5ad file
+
+sc$pp$neighbors(adata_ep_normal, n_neighbors=20L, use_rep='pca')
+sc$tl$paga(adata_ep_normal, groups='celltype')
+adata_ep_normal$write_h5ad("./Results/Normal Cells/ep_normal_anndata_obj.h5ad")
+```
+
+Plot the PAGA estimated cluster connectivity.
+
+```{r}
+plt <- import("matplotlib")
+plt$use("Agg", force = TRUE)
+sc$pl$paga(adata_ep_normal,
+           color='celltype',
+           fontsize=7,
+           frameon=FALSE,
+           save="ep_normal.png")
+```
+
+
+
+## 2.2. Definition of Gene Signatures for Normal Epithelial Cell Types
+
+
+After annotating the clusters of normal epithelial cells, we want to define the gene signature of each cell type, in order to build a classifier in the next step. For that, we will use two different methods.
+
+First, determine the positive/upregulated marker genes of each cell type, using the FindAllMarkers function with the following thresholds: min.pct = 0.25, logfc.threshold = 0.8 and p-value < 0.05. Then, also filter the results considering pct.1 > 0.7 and p_val_adj < 0.05.
+
+```{r, fig.height=10, fig.width=10}
+ep_normal_markers <- FindAllMarkers(ep_normal, only.pos = TRUE, min.pct = 0.25,
+                                    logfc.threshold = 0.8, return.thresh = 0.05)
+
+ep_normal_markers <- filter(ep_normal_markers, pct.1 > 0.7 & p_val_adj < 0.05)
+
+top10_ep_normal_markers <- ep_normal_markers %>%
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC)
+
+DoHeatmap(ep_normal, features = top10_ep_normal_markers$gene)
+```
+
+For the second approach, we will apply some functions of a Prediction Analysis of Microarrays (PAM) to our scRNA-seq data, using the pamr package (see kul3_PAM.Rmd).
+
+Save gene expression matrix (normalised and scaled) as a txt file and the correspondent clusters to use for PAM.
+
+```{r}
+exp_matrix <- GetAssayData(object = ep_normal, slot = "data")
+write.table(exp_matrix, file="./Results/Normal Cells/exp_matrix.txt",
+            row.names=TRUE, col.names=TRUE)
+
+classes <- ep_normal@active.ident
+write.table(classes, file="./Results/Normal Cells/classes.txt",
+            row.names=TRUE, col.names=TRUE)
+```
+
+
+Create a Venn Diagram for each cell type, considering the markers obtained with Seurat and the ones obtained with PAM.
+
+```{r}
+# Seurat markers
+Stem_Seurat_markers <- filter(ep_normal_markers, cluster == "Stem-like/TA cells")
+Intermediate_Seurat_markers <- filter(ep_normal_markers, cluster == "Intermediate cells")
+Colonocytes_Seurat_markers <- filter(ep_normal_markers, cluster == "Colonocytes")
+BEST4_Seurat_markers <- filter(ep_normal_markers, cluster == "BEST4+ cells")
+Goblet_Seurat_markers <- filter(ep_normal_markers, cluster == "Goblet cells")
+Tuft_Seurat_markers <- filter(ep_normal_markers, cluster == "Tuft cells")
+
+# PAM markers
+Stem_PAM_markers <- read.table("./Results/Normal Cells/Stem_PAMmarkers.txt")
+colnames(Stem_PAM_markers) <- c("gene")
+
+Intermediate_PAM_markers <- read.table("./Results/Normal Cells/Intermediate_PAMmarkers.txt")
+colnames(Intermediate_PAM_markers) <- c("gene")
+
+Colonocytes_PAM_markers <- read.table("./Results/Normal Cells/Colonocytes_PAMmarkers.txt")
+colnames(Colonocytes_PAM_markers) <- c("gene")
+
+BEST4_PAM_markers <- read.table("./Results/Normal Cells/BEST4_PAMmarkers.txt")
+colnames(BEST4_PAM_markers) <- c("gene")
+
+Goblet_PAM_markers <- read.table("./Results/Normal Cells/Goblet_PAMmarkers.txt")
+colnames(Goblet_PAM_markers) <- c("gene")
+
+Tuft_PAM_markers <- read.table("./Results/Normal Cells/Tuft_PAMmarkers.txt")
+colnames(Tuft_PAM_markers) <- c("gene")
+
+
+# Venn Diagrams
+venn.diagram(
+        x = list(Stem_Seurat_markers[,7], Stem_PAM_markers[,1]),
+        category.names = c("Seurat Markers" , "PAM Markers"),
+        filename = "./Results/Normal Cells/Stem_venn_diagram.png",
+        output=TRUE,
+        # Output features
+        imagetype="png" ,
+        height = 600 , 
+        width = 600 , 
+        resolution = 300,
+        compression = "lzw",
+        rotation.degree = 180,
+        # Title
+        main = "Stem-like/TA Cell Markers",
+        main.fontfamily = "sans",
+        main.cex = 0.6,
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = c("light blue","pink"),
+        # Numbers
+        cex = 0.5,
+        fontfamily = "sans",
+        # Set names
+        cat.cex = 0.5,
+        cat.default.pos = "outer",
+        cat.pos = c(-30, 30),
+        cat.dist = c(0.04, 0.04),
+        cat.fontfamily = "sans",
+        scaled = TRUE
+)
+
+venn.diagram(
+        x = list(Intermediate_Seurat_markers[,7], Intermediate_PAM_markers[,1]),
+        category.names = c("Seurat Markers" , "PAM Markers"),
+        filename = "./Results/Normal Cells/Intermediate_venn_diagram.png",
+        output=TRUE,
+        # Output features
+        imagetype="png" ,
+        height = 600 , 
+        width = 600 , 
+        resolution = 300,
+        compression = "lzw",
+        # Title
+        main = "Intermediate Cell Markers",
+        main.fontfamily = "sans",
+        main.cex = 0.6,
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = c("light blue","pink"),
+        # Numbers
+        cex = 0.5,
+        fontfamily = "sans",
+        # Set names
+        cat.cex = 0.5,
+        cat.default.pos = "outer",
+        cat.pos = c(-30, 20),
+        cat.dist = c(0.04, 0.04),
+        cat.fontfamily = "sans",
+        scaled = TRUE
+)
+
+venn.diagram(
+        x = list(Colonocytes_Seurat_markers[,7], Colonocytes_PAM_markers[,1]),
+        category.names = c("Seurat Markers" , "PAM Markers"),
+        filename = "./Results/Normal Cells/Colonocytes_venn_diagram.png",
+        output=TRUE,
+        # Output features
+        imagetype="png" ,
+        height = 600 , 
+        width = 600 , 
+        resolution = 300,
+        compression = "lzw",
+        # Title
+        main = "Colonocyte Markers",
+        main.fontfamily = "sans",
+        main.cex = 0.6,
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = c("light blue","pink"),
+        # Numbers
+        cex = 0.5,
+        fontfamily = "sans",
+        # Set names
+        cat.cex = 0.5,
+        cat.default.pos = "outer",
+        cat.pos = c(-30, 30),
+        cat.dist = c(0.04, 0.04),
+        cat.fontfamily = "sans",
+        scaled = TRUE
+)
+
+venn.diagram(
+        x = list(BEST4_Seurat_markers[,7], BEST4_PAM_markers[,1]),
+        category.names = c("Seurat Markers" , "PAM Markers"),
+        filename = "./Results/Normal Cells/BEST4_venn_diagram.png",
+        output=TRUE,
+        # Output features
+        imagetype="png" ,
+        height = 600 , 
+        width = 600 , 
+        resolution = 300,
+        compression = "lzw",
+        # Title
+        main = "BEST4+ Cell Markers",
+        main.fontfamily = "sans",
+        main.cex = 0.6,
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = c("light blue","pink"),
+        # Numbers
+        cex = 0.5,
+        fontfamily = "sans",
+        # Set names
+        cat.cex = 0.5,
+        cat.default.pos = "outer",
+        cat.pos = c(-30, 30),
+        cat.dist = c(0.04, 0.04),
+        cat.fontfamily = "sans",
+        scaled = TRUE
+)
+
+venn.diagram(
+        x = list(Goblet_Seurat_markers[,7], Goblet_PAM_markers[,1]),
+        category.names = c("Seurat Markers" , "PAM Markers"),
+        filename = "./Results/Normal Cells/Goblet_venn_diagram.png",
+        output=TRUE,
+        # Output features
+        imagetype="png" ,
+        height = 600 , 
+        width = 600 , 
+        resolution = 300,
+        compression = "lzw",
+        rotation.degree = 180,
+        # Title
+        main = "Goblet Cell Markers",
+        main.fontfamily = "sans",
+        main.cex = 0.6,
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = c("light blue","pink"),
+        # Numbers
+        cex = 0.5,
+        fontfamily = "sans",
+        # Set names
+        cat.cex = 0.5,
+        cat.default.pos = "outer",
+        cat.pos = c(160, -150),
+        cat.dist = c(0.04, 0.04),
+        cat.fontfamily = "sans",
+        scaled = TRUE
+)
+
+venn.diagram(
+        x = list(Tuft_Seurat_markers[,7], Tuft_PAM_markers[,1]),
+        category.names = c("Seurat Markers" , "PAM Markers"),
+        filename = "./Results/Normal Cells/Tuft_venn_diagram.png",
+        output=TRUE,
+        # Output features
+        imagetype="png" ,
+        height = 600 , 
+        width = 600 , 
+        resolution = 300,
+        compression = "lzw",
+        rotation.degree = 180,
+        # Title
+        main = "Tuft Cell Markers",
+        main.fontfamily = "sans",
+        main.cex = 0.6,
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = c("light blue","pink"),
+        # Numbers
+        cex = 0.5,
+        fontfamily = "sans",
+        # Set names
+        cat.cex = 0.5,
+        cat.default.pos = "outer",
+        cat.pos = c(170, -150),
+        cat.dist = c(0.04, 0.04),
+        cat.fontfamily = "sans",
+        scaled = TRUE
+)
+```
+
+Plot Venn Diagrams. https://stackoverflow.com/questions/25360248/arrange-multiple-32-png-files-in-a-grid
+
+```{r, fig.height=15, fig.width=30}
+library(png)
+library(grid)
+library(gridExtra)
+
+venn1 <- readPNG("./Results/Normal Cells/Stem_venn_diagram.png")
+venn2 <- readPNG("./Results/Normal Cells/Intermediate_venn_diagram.png")
+venn3 <- readPNG("./Results/Normal Cells/Colonocytes_venn_diagram.png")
+venn4 <- readPNG("./Results/Normal Cells/BEST4_venn_diagram.png")
+venn5 <- readPNG("./Results/Normal Cells/Goblet_venn_diagram.png")
+venn6 <- readPNG("./Results/Normal Cells/Tuft_venn_diagram.png")
+
+grid.arrange(rasterGrob(venn1),rasterGrob(venn2),rasterGrob(venn3),
+             rasterGrob(venn4),rasterGrob(venn5),rasterGrob(venn6),
+             ncol = 3)
+```
+
+Select common markers from Seurat and PAM. To avoid possibly biased results in the classification step (next step) caused by the selection of a very different number of marker genes for each cell type, we established a maximum number of 15 genes. The top 15 genes will be filtered based on the avg_log2FC.
+
+```{r}
+Stem_markers_int <- merge(Stem_Seurat_markers, Stem_PAM_markers, by = "gene")
+Intermediate_markers_int <- merge(Intermediate_Seurat_markers, Intermediate_PAM_markers, by = "gene")
+Colonocytes_markers_int <- merge(Colonocytes_Seurat_markers, Colonocytes_PAM_markers, by = "gene")
+BEST4_markers_int <- merge(BEST4_Seurat_markers, BEST4_PAM_markers, by = "gene")
+Goblet_markers_int <- merge(Goblet_Seurat_markers, Goblet_PAM_markers, by = "gene")
+Tuft_markers_int <- merge(Tuft_Seurat_markers, Tuft_PAM_markers, by = "gene")
+
+# Select top 15 genes
+Stem_markers_int <- Stem_markers_int[,1:7] %>%
+  top_n(n = 15, wt = avg_log2FC)
+#Stem_markers_int <- Stem_markers_int[,1]
+
+Intermediate_markers_int <- Intermediate_markers_int[,1:7] %>%
+  top_n(n = 15, wt = avg_log2FC)
+#Intermediate_markers_int <- Intermediate_markers_int[,1]
+
+Colonocytes_markers_int <- Colonocytes_markers_int[,1:7] %>%
+  top_n(n = 15, wt = avg_log2FC)
+#Colonocytes_markers_int <- Colonocytes_markers_int[,1]
+
+BEST4_markers_int <- BEST4_markers_int[,1:7] %>%
+  top_n(n = 15, wt = avg_log2FC)
+#BEST4_markers_int <- BEST4_markers_int[,1]
+
+Goblet_markers_int <- Goblet_markers_int[,1:7] %>%
+  top_n(n = 15, wt = avg_log2FC)
+#Goblet_markers_int <- Goblet_markers_int[,1]
+
+Tuft_markers_int <- Tuft_markers_int[,1:7] %>%
+  top_n(n = 15, wt = avg_log2FC)
+#Tuft_markers_int <- Tuft_markers_int[,1]
+
+
+# Check if there are coincident markers for different cell types
+markers_int <- data.frame(Genes = c(Stem_markers_int[,1],Intermediate_markers_int[,1],
+                                    Colonocytes_markers_int[,1],BEST4_markers_int[,1],
+                                    Goblet_markers_int[,1],Tuft_markers_int[,1]),
+                          Cell_Types = c(Stem_markers_int[,7],Intermediate_markers_int[7],
+                                         Colonocytes_markers_int[,7],BEST4_markers_int[,7],
+                                         Goblet_markers_int[,7],Tuft_markers_int[7]))
+
+write.table(markers_int,file="./Results/Normal Cells/markers_int.txt",
+            row.names=TRUE, col.names=TRUE)
+# markers_int <- read.table(file="./Results/Normal Cells/markers_int.txt")
+```
+
+
+Plot a heatmap with marker genes.
+
+```{r, fig.height=15, fig.width=20}
+DoHeatmap(ep_normal, features = markers_int[,1]) 
+```
+
+```{r, fig.height=8, fig.width=20}
+markers_int <- unique(unlist(strsplit(markers_int[,1], " ")))
+
+DotPlot(ep_normal, features = markers_int,
+        dot.scale = 8, cols = c("blue","red")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+```{r, fig.height=10, fig.width=15}
+FeaturePlot(ep_normal, features = c("IFI27", "SPIB","MALAT1"),
+            slot= "scale.data", cols = c("blue","red"))
+```
+
+Adapt cell type names to fit the classifier.
+
+```{r}
+new_ident <- setNames(c("Stem_TA cells",
+                        "Intermediate cells",
+                        "Colonocytes",
+                        "BEST4 cells",
+                        "Goblet cells",
+                        "Tuft cells"),
+                      levels(ep_normal))
+
+ep_normal <- RenameIdents(ep_normal, new_ident)
+
+DimPlot(ep_normal, reduction = "umap", label = FALSE)
+
+saveRDS(ep_normal, file = "./scAnnotatR/ep_normal_final.RDS")
+```
+
+

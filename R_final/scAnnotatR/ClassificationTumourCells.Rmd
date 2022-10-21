@@ -1,0 +1,383 @@
+---
+title: "Classification of Tumour Epithelial Cells"
+author: "Francisca Xara-Brasil"
+output: html_notebook
+---
+
+Tutorial: https://github.com/grisslab/scAnnotatR/blob/master/vignettes/classifying-cells.Rmd
+
+
+# Installation
+
+The `scAnnotatR` package can be directly installed from Bioconductor:
+
+```{r, eval = FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+if (!require(scAnnotatR))
+  BiocManager::install("scAnnotatR")
+```
+
+For more information, see https://bioconductor.org/install/.
+
+```{r}
+# load scAnnotatR into working space
+library(scAnnotatR)
+library(dplyr)
+library(writexl)
+library(ggplot2)
+
+dir <- choose.dir() #Select file "R_final"
+```
+
+
+
+# Models
+
+```{r}
+path_to_models = paste0(dir,"/scAnnotatR")
+models <- load_models(path_to_models)
+names(models)
+```
+
+```{r}
+models[['Stem_TA cells']]
+models[['Intermediate cells']]
+models[['Colonocytes']]
+models[['BEST4 cells']]
+models[['Goblet cells']]
+models[['Tuft cells']]
+```
+
+
+
+# Basic pipeline to identify cell types in a scRNA-seq dataset using scAnnotatR   
+
+## Preparing the data
+
+```{r}
+# load the example dataset
+ep_tumour <- readRDS(paste0(dir,"/Results/Tumour Cells/ep_tumour_2.RDS"))
+ep_tumour
+```
+
+The example dataset already contains the clustering results as part of the metadata. This is **not** necessary for the classification process.
+
+```{r}
+head(ep_tumour[[]])
+```
+
+
+
+## Cell classification
+
+To launch cell type identification, we simply call the `classify_cells` 
+function. A detailed description of all parameters can be found through
+the function's help page `?classify_cells`.
+
+To use all pretrained classifiers on the dataset, `cell_types = 'all'` can be used.
+
+```{r}
+c_types <- c("Stem_TA cells","Intermediate cells","Colonocytes","BEST4 cells",
+             "Goblet cells","Tuft cells")
+
+tumour_class.obj <- classify_cells(classify_obj = ep_tumour, 
+                             assay = 'RNA', slot = 'data',
+                             cell_types = c_types,
+                             path_to_models = path_to_models)
+
+saveRDS(tumour_class.obj, file = paste0(dir,"/scAnnotatR/tumour_class.obj.RDS"))
+#tumour_class.obj <- readRDS(paste0(dir,"/scAnnotatR/tumour_class.obj.RDS"))
+```
+
+
+
+## Parameters
+
+  * The option **cell_types = 'all'** tells the function to use all available
+    cell classification models.
+    Alternatively, we can limit the identifiable cell types: 
+    * by specifying: `cell_types = c('Stem_TA cells', 'Intermediate cells')`
+    * or by indicating the applicable classifier using the **classifiers** option: 
+      `classifiers = c(default_models[['Stem_TA cells']], default_models[['Intermediate cells']])`
+
+  * The option **path_to_models = 'default'** is to automatically use the 
+    package-integrated pretrained models (without loading the models into the
+    current working space). This option can be used to load a local database instead.
+    For more details see the vignettes on training your own classifiers.
+
+
+
+# Result interpretation
+
+The `classify_cells` function returns the input object
+but with additional columns in the metadata table.
+
+```{r}
+# display the additional metadata fields
+tumour_class <- tumour_class.obj[[]][, c(22:ncol(tumour_class.obj[[]]))]
+tumour_class
+
+# write.table(tumour_class,
+#             file=paste0(dir,"/scAnnotatR/scAnnotatR_tumour_class.txt"),
+#             row.names=TRUE, col.names=TRUE)
+```
+
+New columns are:
+
+  * **predicted_cell_type**: The predicted cell type, also containing any 
+    ambiguous assignments. In these cases, the possible cell types are separated
+    by a "/"
+
+  * **most_probable_cell_type**: contains the most probably cell type ignoring any 
+    ambiguous assignments.
+
+  * columns with syntax `[celltype]_p`: probability of a cell to belong 
+    to a cell type. Unknown cell types are marked as NAs.
+
+
+
+## Result visualization
+
+The predicted cell types can now simply be visualized using the matching
+plotting functions. 
+
+```{r}
+# Visualize the cell types
+Seurat::DimPlot(tumour_class.obj, group.by = "most_probable_cell_type")
+Seurat::DimPlot(tumour_class.obj, group.by = "most_probable_cell_type", split.by = "Patient",
+                ncol = 3)
+Seurat::DimPlot(tumour_class.obj, group.by = "most_probable_cell_type", split.by = "Cell_subtype", 
+                ncol = 2)
+```
+
+```{r, fig.width=30, fig.height=10}
+# Visualize the cell types
+Seurat::DimPlot(tumour_class.obj, group.by = "predicted_cell_type")
+```
+
+```{r, fig.width=20, fig.height=25}
+# Visualize the cell types
+Seurat::DimPlot(tumour_class.obj, group.by = "predicted_cell_type",
+                split.by = "predicted_cell_type", ncol = 4) + NoLegend()
+```
+
+```{r, fig.width=30, fig.height=30}
+# Merge hybrid and confused states
+tumour_class.obj_alt <- tumour_class.obj
+Idents(tumour_class.obj_alt) <- tumour_class.obj_alt@meta.data$predicted_cell_type
+#levels(tumour_class.obj_alt)
+
+new_ident <- setNames(c("Goblet cells", "Stem-like/TA cells",
+                        "Differentiating cells","Unknown",
+                        "BEST4+ cells","Colonocytes",
+                        "Intermediate cells","Confused cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Confused cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Tuft cells","Differentiating cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Hybrid cells","Differentiating cells",
+                        "Differentiating cells","Hybrid cells",
+                        "Differentiating cells","Differentiating cells",
+                        "Confused cells","Confused cells",
+                        "Differentiating cells","Differentiating cells"),
+                      levels(tumour_class.obj_alt))
+
+tumour_class.obj_alt <- RenameIdents(tumour_class.obj_alt, new_ident)
+
+my_levels <- c("Stem-like/TA cells","Intermediate cells",
+               "Colonocytes","BEST4+ cells","Goblet cells","Tuft cells",
+               "Differentiating cells","Hybrid cells",
+               "Confused cells","Unknown")
+
+# Relevel object@ident
+Idents(tumour_class.obj_alt) <- factor(Idents(tumour_class.obj_alt), levels = my_levels)
+tumour_class.obj_alt$orig.ident <- Idents(tumour_class.obj_alt)
+```
+
+```{r, fig.height=4, fig.width=7}
+Seurat::DimPlot(tumour_class.obj_alt)
+Seurat::DimPlot(tumour_class.obj_alt, split.by = "orig.ident", ncol = 5) + NoLegend()
+```
+
+
+```{r, fig.height=20, fig.width=23}
+markers_int <- read.table(file=paste0(dir,"/Results/Normal Cells/markers_int.txt"))
+markers.to.plot <- markers_int[,1]
+
+DoHeatmap(tumour_class.obj_alt, features = markers.to.plot, assay = "RNA",
+          group.by = "most_probable_cell_type") 
+DoHeatmap(tumour_class.obj_alt, features = markers.to.plot, assay = "RNA")
+```
+
+```{r, fig.height=8, fig.width=20}
+markers.to.plot <- unique(unlist(strsplit(markers.to.plot, " ")))
+
+DotPlot(tumour_class.obj_alt, features = markers.to.plot, assay = "RNA",
+        #group.by = "predicted_cell_type",
+        dot.scale = 8, cols = c("blue","red")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+For a certain cell type, users can also view the prediction probability.
+
+```{r fig.width = 10, fig.height = 10}
+# Visualize the cell types
+Seurat::FeaturePlot(tumour_class.obj_alt,
+                    features = c("Stem_TA_cells_p","Intermediate_cells_p",
+                                 "Colonocytes_p","Goblet_cells_p","Tuft_cells_p"))
+```
+
+We want to calculate the percentage of each cell type in the whole sample.
+
+```{r, fig.height=5,fig.width=5}
+df_class <- data.frame(Class = tumour_class.obj_alt$Class,
+                       Cell_Types = tumour_class.obj_alt$orig.ident)
+
+df_class[,1] <- ifelse(df_class[,1] == "Tumor", "Tumour", df_class[,1])
+
+total_class <- plyr::count(df_class, vars = "Class")
+prct_class <- plyr::count(df_class, vars = c("Class","Cell_Types"))
+prct_class <- merge(prct_class,total_class, by = "Class")
+prct_class$Percentage <- (prct_class$freq.x / prct_class$freq.y) * 100
+
+ggplot(prct_class, aes(fill = Cell_Types, y = Percentage, x = Class)) + 
+    geom_bar(position="fill", stat="identity")
+```
+
+Per patient.
+
+```{r}
+df_patient <- data.frame(Patients = tumour_class.obj_alt$Patient,
+                         Cell_Types = tumour_class.obj_alt$orig.ident)
+
+total_patient <- plyr::count(df_patient, vars = "Patients")
+prct_patient <- plyr::count(df_patient, vars = c("Patients","Cell_Types"))
+prct_patient <- merge(prct_patient,total_patient, by = "Patients")
+prct_patient$Percentage <- (prct_patient$freq.x / prct_patient$freq.y) * 100
+
+
+ggplot(prct_patient, aes(fill = Cell_Types, y = Percentage, x = Patients)) + 
+    geom_bar(position="fill", stat="identity") 
+```
+
+We want to calculate the percentage of each cell type per CMS.
+
+```{r}
+df_cms <- data.frame(CMS = tumour_class.obj_alt$Cell_subtype,
+                         Cell_Types = tumour_class.obj_alt$orig.ident)
+
+total_cms <- plyr::count(df_cms, vars = "CMS")
+prct_cms <- plyr::count(df_cms, vars = c("CMS","Cell_Types"))
+prct_cms <- merge(prct_cms,total_cms, by = "CMS")
+prct_cms$Percentage <- (prct_cms$freq.x / prct_cms$freq.y) * 100
+
+ggplot(prct_cms, aes(fill = Cell_Types, y = Percentage, x = CMS)) + 
+    geom_bar(position="fill", stat="identity") 
+```
+
+Plot a Sankey diagram.
+
+```{r}
+library(networkD3)
+library(tidyr)
+library(tibble)
+
+# Create an incidence matrix. Usually the flow goes from the row names to the column names.
+# Remember that our connection are directed since we are working with a flow.
+mtx <- as.matrix(dcast(prct_cms, CMS ~ Cell_Types, value.var="freq.x", fill=0))
+rownames(mtx) <- mtx[,1]
+mtx <- mtx[,-1]
+
+# Transform it to connection data frame with tidyr from the tidyverse:
+links <- mtx %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="source") %>% 
+  gather(key="target", value="value", -1) %>%
+  filter(value != 0)
+ 
+# From these flows we need to create a node data frame: it lists every entities involved in the flow
+nodes <- data.frame(
+  name=c(as.character(links$source), as.character(links$target)) %>% 
+    unique()
+  )
+ 
+# With networkD3, connection must be provided using id, not using real name like in the links dataframe.. So we need to reformat it.
+links$IDsource <- match(links$source, nodes$name)-1 
+links$IDtarget <- match(links$target, nodes$name)-1
+
+# prepare colour scale
+ColourScal ='d3.scaleOrdinal() .range([""])'
+
+my_color <- 'd3.scaleOrdinal() .domain(["CMS1", "CMS2", "CMS3", "CMS4", "Stem-like/TA", "Intermediate", "Colonocytes", "BEST4+", "Goblet", "Tuft", "Differentiating", "Hybrid", "Confused", "Unknown"]) .range(["#F8766D", "#E68613", "#ABA300", "#0CB702", "#F8766D", "#E68613", "#ABA300", "#0CB702", "#00BE67", "#00C19A", "#00A9FF", "#8494FF", "#ED68ED", "#FF68A1"])'
+ 
+ 
+# Make the Network
+p <- sankeyNetwork(Links = links, Nodes = nodes,
+                     Source = "IDsource", Target = "IDtarget",
+                     Value = "value", NodeID = "name", 
+                     sinksRight=FALSE, colourScale = my_color,fontSize = 12)
+
+p
+```
+
+
+
+## Conectivity Analysis with PAGA
+
+To evaluate how different cell types are connected with each other and to understand potential developmental relationships, we will use PAGA, which is included as part of the scanpy toolkit in Python.
+
+As scanpy is a python package and does not support a Seurat object as the input, we need to store its information in a format that scanpy supports. We will use the anndata package to create a h5ad file with the information needed (e.g. PCA, UMAP, and cell type annotation).
+
+```{r}
+library(anndata) #install.packages("anndata")
+adata <- AnnData(X = t(as.matrix(tumour_class.obj_alt[['RNA']]@data)),
+                 obs = data.frame(celltype = tumour_class.obj_alt@active.ident,
+                                  row.names = colnames(tumour_class.obj_alt)),
+                 var = tumour_class.obj_alt[['RNA']]@meta.features,
+                 layers = list(counts = t(as.matrix(tumour_class.obj_alt[['RNA']]@counts))),
+                 obsm = list(pca = Embeddings(tumour_class.obj_alt,"pca")[,1:20],
+                             umap = Embeddings(tumour_class.obj_alt,"umap"))
+                )
+adata$write_h5ad(paste0(dir,"./Results/Tumour Cells/ep_tumour_anndata_obj.h5ad"))
+```
+
+Next, we need to swtich to Python (>=3.6). To stay in R, we will use the reticulate R package, which provides an interface to Python.
+
+```{r}
+library(reticulate)
+py_install("scanpy", pip=T)
+sc <- import("scanpy")
+```
+
+PAGA analysis, using the results previously obtained with Seurat.
+
+```{r}
+adata_ep_tumour <- sc$read(paste0(dir,"./Results/Tumour Cells/ep_tumour_anndata_obj.h5ad")) # load the h5ad file
+
+sc$pp$neighbors(adata_ep_tumour, n_neighbors=20L, use_rep='pca')
+sc$tl$paga(adata_ep_tumour, groups='celltype')
+adata_ep_tumour$write_h5ad(paste0(dir,"./Results/Tumour Cells/ep_tumour_anndata_obj.h5ad"))
+```
+
+Plot the PAGA estimated cluster connectivity.
+
+```{r}
+plt <- import("matplotlib")
+plt$use("Agg", force = TRUE)
+sc$pl$paga(adata_ep_tumour,
+           color='celltype',
+           fontsize=7,
+           fontoutline = 2,
+           node_size_scale = 1,
+           edge_width_scale = 0.5,
+           frameon=FALSE,
+           save="ep_tumour.png")
+```
+
+

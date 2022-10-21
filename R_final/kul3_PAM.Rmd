@@ -1,0 +1,93 @@
+---
+title: "Prediction Analysis of Microarrays (PAM)"
+author: "Francisca Xara-Brasil"
+output: html_notebook
+---
+
+Tutorials:
+https://www.huber.embl.de/users/klaus/Teaching/ML-lab.html#using-pam
+https://tibshirani.su.domains/PAM/Rdist/doc/readme.html
+
+Reading in data.
+
+```{r}
+dir <- choose.dir() #Select file "R_final"
+
+setwd(dir)
+
+library(pamr)
+library(tseries)
+library(writexl)
+library(dplyr)
+
+x <- read.table(file = "./Results/Normal Cells/exp_matrix.txt") 
+x <- data.matrix(x)
+y <- read.table("./Results/Normal Cells/classes.txt")
+y <- factor(y[,1])
+genenames <- rownames(x)
+mydata <- list(x = x, y = y, genenames = factor(genenames), geneid = factor(genenames))
+```
+
+Train the classifier and type name of object to see the results.
+
+```{r}
+data.train <- pamr.train(mydata)
+data.train
+```
+
+Cross-validate the classifier.
+
+```{r}
+data.results<- pamr.cv(data.train, mydata)
+data.results
+```
+
+```{r, fig.height=20, fig.width=10}
+## Plot the cross-validated error curves
+pamr.plotcv(data.results)
+```
+
+
+```{r}
+## Compute the confusion matrix for a particular model 
+pamr.confusion(data.results, threshold=6)
+```
+
+```{r}
+## List the significant genes
+marker_genes <- pamr.listgenes(data.train, mydata, threshold=6)
+marker_genes <- as.data.frame(marker_genes)
+
+write_xlsx(marker_genes,"./Results/Normal Cells/marker_genes_PAM.xlsx")
+```
+
+Select positive/upregulated (positive standardised centroid coordinate) marker genes by filtering, for each cell type, the genes with a correspondent standardised centroid coordinate above 0.5.
+
+```{r}
+
+BEST4_marker_genes <- filter_all(marker_genes, all_vars(as.numeric(marker_genes[,2]) > 0.5))
+Colonocytes_marker_genes <- filter_all(marker_genes, all_vars(as.numeric(marker_genes[,3]) > 0.5))
+Goblet_marker_genes <- filter_all(marker_genes, all_vars(as.numeric(marker_genes[,4]) > 0.5))
+Intermediate_marker_genes <- filter_all(marker_genes, all_vars(as.numeric(marker_genes[,5]) > 0.5))
+Stem_marker_genes <- filter_all(marker_genes, all_vars(as.numeric(marker_genes[,6]) > 0.5))
+Tuft_marker_genes <- filter_all(marker_genes, all_vars(as.numeric(marker_genes[,7]) > 0.5))
+
+
+write.table(BEST4_marker_genes,
+            file="./Results/Normal Cells/BEST4_PAMmarkers.txt",
+            row.names=TRUE, col.names=TRUE)
+write.table(Colonocytes_marker_genes,
+            file="./Results/Normal Cells/Colonocytes_PAMmarkers.txt",
+            row.names=TRUE, col.names=TRUE)
+write.table(Goblet_marker_genes,file="./Results/Normal Cells/Goblet_PAMmarkers.txt",
+            row.names=TRUE, col.names=TRUE)
+write.table(Intermediate_marker_genes,file="./Results/Normal Cells/Intermediate_PAMmarkers.txt",
+            row.names=TRUE, col.names=TRUE)
+write.table(Stem_marker_genes,file="./Results/Normal Cells/Stem_PAMmarkers.txt",
+            row.names=TRUE, col.names=TRUE)
+write.table(Tuft_marker_genes,file="./Results/Normal Cells/Tuft_PAMmarkers.txt",
+            row.names=TRUE, col.names=TRUE)
+
+```
+
+

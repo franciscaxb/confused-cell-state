@@ -1,0 +1,418 @@
+---
+title: "KUL3 Dataset Analysis - Tumour Cells"
+author: "Francisca Xara-Brasil"
+output: html_notebook
+---
+
+Tutorials: https://github.com/quadbiolab/scRNAseq_analysis_vignette/blob/master/Tutorial.md
+           https://satijalab.org/seurat/articles/pbmc3k_tutorial.html
+
+
+
+# General
+
+Load necessary libraries.
+
+```{r}
+dir <- choose.dir() #Select file "R_final"
+
+setwd(dir)
+
+# Data manipulation
+library(Seurat)
+#library(SeuratData) #devtools::install_github('satijalab/seurat-data')
+library(data.table)
+library(Matrix)
+#library(DropletUtils) #BiocManager::install("DropletUtils")
+library(dplyr)
+
+
+# Gene set enrichment
+#library(gprofiler2)
+
+# Plotting
+library(ggplot2)
+library(patchwork)
+#library(gplots)
+#library(cowplot)
+
+set.seed(1)
+
+#memory.limit(size = 70000)
+```
+
+
+
+# 1. Standard Analyses
+
+## 1.1. Create a Seurat Object
+
+Run KUL3_NormalCells first and then upload cr_cancer Seurat Object.
+
+```{r}
+cr_cancer <- readRDS("./Results/cr_cancer.RDS")
+```
+
+In this Notebook, we will only considering "tumour" cells. 
+
+```{r}
+cr_tumour <- subset(cr_cancer, subset = Class == "Tumor")
+
+dim(cr_tumour)
+```
+
+
+
+## 1.2. Quality Control
+
+Get % of reads coming from MT transcripts. In most species, these can be inferred either by their gene name ("MT-" in human, "mt-" in mouse, etc.) or by finding if the gene is encoded in the mitochondrial chromosome.
+
+```{r}
+cr_tumour <- PercentageFeatureSet(cr_tumour, col.name = "percent.mt", pattern = "^MT-")
+```
+
+Visualise QC metrics as violin plots. Note that data was previously filtered by Lee et al. (2020): cells with >1000 UMI counts; >200 gen, but es and <6000 genes;
+and <20% of mitochondrial gene expression in UMI counts.
+
+```{r, fig.width=10, fig.height=5}
+VlnPlot(cr_tumour, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"))
+```
+
+Visualise QC metrics as scatterplots, illustrating feature-feature relationships.
+
+```{r, fig.width=15, fig.height=5}
+plot1 <- FeatureScatter(cr_tumour, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(cr_tumour, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+(plot1 + plot2)
+```
+
+Although we tested more filters, we concluded that the thresholds used by Lee et al. (2020) were good enough, based on the previous plots. Then, we decided not to remove any more cells.
+
+Save Seurat Objects.
+
+```{r}
+cr_tumour_filt <- cr_tumour
+
+saveRDS(cr_tumour_filt, file = "./Results/Tumour Cells/cr_tumour_filt.RDS")
+
+# cr_tumour_filt <- readRDS("./Results/Tumour Cells/cr_tumour_filt.RDS")
+```
+
+
+
+## 1.3. Normalisation
+
+A normalisation step is necessary, in order to make gene expression levels between different cells comparable.
+
+The gene counts for each cell are divided by the total counts for that cell, and then multiplied by a scale factor 10000. After that, the resulting expression levels undergo a log-transformation, so that the expression values better fit a normal distribution.
+
+```{r}
+cr_tumour_filt <- NormalizeData(cr_tumour_filt, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+
+
+## 1.4. Highly Variable Genes Selection
+
+When analysing scRNA-seq data, not every gene has the same contribution or level of information for the identification of distinct cell groups. Thereby, it is important to perform an appropriate selection of highly variable features, i.e. genes with the most varied expression levels across cells, before further exploring the data.
+
+By default, Seurat calculates the standardised variance of each gene across cells, and then selects the top 2000 ones as the highly variable genes (HVGs).
+
+```{r}
+cr_tumour_filt <- FindVariableFeatures(cr_tumour_filt, selection.method = "vst", nfeatures = 2000)
+```
+
+We can check what are the HVG.
+
+```{r, fig.width=10, fig.height=5}
+top_features <- head(VariableFeatures(cr_tumour_filt), 15)
+plot1 <- VariableFeaturePlot(cr_tumour_filt)
+plot2 <- LabelPoints(plot = plot1, points = top_features, repel = TRUE)
+
+plot2
+```
+
+
+
+## 1.5. Data scaling
+
+Scaling is a linear transformation that:
+(1) shifts the expression of each gene, so that the mean expression across cells is 0;
+(2) scales the expression of each gene, so that the variance across cells is 1 (this gives equal weight in downstream analyses, so that highly-expressed genes are not dominant).
+
+```{r}
+all.genes <- rownames(cr_tumour_filt)
+
+cr_tumour_filt <- ScaleData(cr_tumour_filt, features = all.genes)
+```
+
+
+
+## 1.6. Dimensionality Reduction using PCA
+
+Seurat uses truncated PCA to only calculate the first PCs, by default the top 50 PCs.
+
+```{r}
+cr_tumour_filt <- RunPCA(cr_tumour_filt, npcs = 50)
+```
+
+We can plot it to see its general shape.
+
+```{r}
+DimPlot(cr_tumour_filt, reduction = "pca", dims = c(1,2))
+```
+
+The elbow plot method was used to determine the number of relevant PCs. It consists of plotting the standard deviation as a function of each PC, and picking the elbow of the curve as the number of PCs to use. We selected the first 20 PCs.
+
+```{r}
+ElbowPlot(cr_tumour_filt, ndims = 50)
+```
+
+
+
+## 1.7. Dimensionality Reduction using UMAP (and t-SNE)
+
+We can run UMAP using the chosen top PCs.
+
+```{r}
+ncomp <- 20
+
+cr_tumour_filt <- RunUMAP(cr_tumour_filt, dims = 1:ncomp, verbose = F)
+cr_tumour_filt <- RunTSNE(cr_tumour_filt, dims = 1:ncomp, verbose = F)
+```
+
+Just to see how UMAP looks.
+
+```{r}
+DimPlot(cr_tumour_filt, reduction = "umap", group.by = "Class")
+DimPlot(cr_tumour_filt, reduction = "umap", group.by = "Patient")
+DimPlot(cr_tumour_filt, reduction = "umap", split.by = "Patient", ncol = 3)
+```
+
+See how t-SNE looks.
+
+```{r}
+DimPlot(cr_tumour_filt, reduction = "tsne", group.by = "Class")
+DimPlot(cr_tumour_filt, reduction = "tsne", group.by = "Patient")
+DimPlot(cr_tumour_filt, reduction = "tsne", split.by = "Patient", ncol = 3)
+```
+
+It seems that some groups of cells are patient-specific, which could indicate the presence of batch effects. However, normal cells showed minimal patient specificity. Thus, patient-specific transcriptomic groups formed by tumour cells likely represent biological differences between patients, rather than batch effects.
+
+
+Save.
+
+```{r}
+saveRDS(cr_tumour_filt, file = "./Results/Tumour Cells/cr_tumour_filt_2.RDS")
+
+# cr_tumour_filt <- readRDS("./Results/Tumour Cells/cr_tumour_filt_2.RDS")
+```
+
+
+
+## 1.8. Clustering
+
+We can use the chosen PCs to get a neighbourhood graph for all cells.
+
+```{r}
+red = "pca"
+
+cr_tumour_filt <- FindNeighbors(cr_tumour_filt, dims = 1:ncomp,
+                           reduction = red, graph.name = paste0(red, ncomp))
+```
+
+This allows us to detect clusters of cells to then be interpreted. We are using the default Louvain algorithm, and we are getting clusters for multiple resolutions between 0.2 and 1.1.
+
+```{r}
+cr_tumour_filt <- FindClusters(cr_tumour_filt, verbose = F,
+                         graph.name = paste0(red, ncomp),
+                         resolution = seq(0.2, 1.1, 0.1))
+
+# Setting a more sensible identity as default
+cr_tumour_filt <- SetIdent(cr_tumour_filt, value = paste0(red, ncomp, "_res.0.5"))
+```
+
+And so we can have a look at all clustering resolutions.
+    
+```{r, fig.width=14, fig.height=20}
+plt_list <- list()
+for(cl in colnames(cr_tumour_filt@meta.data)[grepl("pca20_", colnames(cr_tumour_filt@meta.data))]){
+  cr_tumour_filt <- SetIdent(cr_tumour_filt, value = cl)
+  plt_list[[cl]] <- DimPlot(cr_tumour_filt, reduction = "umap", label = T, raster = T)+
+    labs(subtitle = cl)+
+    theme(legend.position = "none", aspect.ratio = 1)
+}
+
+print(cowplot::plot_grid(plotlist = plt_list, ncol = 3))
+
+```
+
+We want to define a resolution of 0.2 for further analyses.
+
+```{r}
+# Setting identities according to the previous plots
+cr_tumour_filt <- SetIdent(cr_tumour_filt, value = paste0(red, ncomp, "_res.0.2"))
+
+# Define an order of cluster identities
+my_levels <- c("0","1","2","3","4","5","6","7","8","9","10","11","12","13")
+
+# Relevel object@ident
+Idents(cr_tumour_filt) <- factor(Idents(cr_tumour_filt), levels = my_levels)
+
+DimPlot(cr_tumour_filt, reduction = "umap", label = T, raster = T) + NoLegend()
+```
+
+Save.
+
+```{r}
+saveRDS(cr_tumour_filt, file = "./Results/Tumour Cells/cr_tumour_filt_3.RDS")
+
+# cr_tumour_filt <- readRDS("./Results/Tumour Cells/cr_tumour_filt_3.RDS")
+
+```
+
+
+
+## 1.9. Identificaion and Selection of Epithelial Cells
+
+we are interested in analysing epithelial cells so, to identify them, we used two different approaches.
+
+For the first approach, we want to check the expression of some canonical epithelial cell type markers, according to literature (Lee et al., Li et al. and Khaliq et al.).
+
+
+```{r, fig.width=15, fig.height=8}
+ep_markers <- c("EPCAM", "VIL1", "KRT20", "CLDN7", "CDH1", "KRT18")
+
+FeaturePlot(cr_tumour_filt, features = ep_markers, reduction = "umap", 
+            ncol = 3)
+```
+
+```{r, fig.width=16, fig.height=8}
+DoHeatmap(cr_tumour_filt, features = ep_markers)
+```
+
+For the second approach, we want to determine the marker genes of each cell cluster and, based on that, do literature search for annotation.
+
+Because of the nature of large sample size in scRNA-seq data (one cell is one sample), it is strongly recommended to not only look at p-values, but also detection rate of the gene in the cluster (pct) and fold change (log2fc) between cells in and outside the cluster. That is why we set min.pct=0.25 and logfc.threshold=1.5 in the function to require threshold on the effect size.
+
+```{r}
+cl_markers <- FindAllMarkers(cr_tumour_filt, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 1.5, verbose = FALSE)
+
+top10_cl_markers <- cl_markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+top10_cl_markers
+```
+
+```{r, fig.width=15, fig.height=18}
+DoHeatmap(cr_tumour_filt, features = top10_cl_markers$gene)
+```
+
+It seems that cells in clusters 3, 4 and 5 correspond to epithelial cells.
+
+We decided to double check our results by comparing them to the classification performed and by Lee et al. (2020).
+
+```{r, fig.width=15, fig.height=5}
+cr_tumour_filt_alt <- cr_tumour_filt
+
+new_ident <- setNames(c("0","1","2","Epithelial cells",
+                        "Epithelial cells","Epithelial cells","6","7","8","9",
+                        "10","11","12","13"),
+                      levels(cr_tumour_filt_alt))
+
+cr_tumour_filt_alt <- RenameIdents(cr_tumour_filt_alt, new_ident)
+
+plot1 <- DimPlot(cr_tumour_filt_alt, reduction = "umap", label = T, raster = T) + NoLegend() +
+  labs(title = "Annotation according to this work") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot2 <- DimPlot(cr_tumour_filt_alt, reduction = "umap", label = T, raster = T, group.by = "Cell_type") + NoLegend() + labs(title = "Annotation according to Lee et al. (2020)")
+
+plot1+plot2
+```
+
+To remove cells with an ambiguous identity, we ended up by selecting only the ones in the intersection of our approach with Lee et al. (2020) approach.
+
+```{r}
+ep_tumour <- subset(cr_tumour_filt, idents = c("3","4","5"), subset = Cell_type == "Epithelial cells")
+
+dim(ep_tumour)
+```
+
+Save.
+
+```{r}
+saveRDS(ep_tumour, file = "./Results/Tumour Cells/ep_tumour.RDS")
+
+# ep_tumour <- readRDS("./Results/Tumour Cells/ep_tumour.RDS")
+```
+
+
+
+# 2. Exploratory Analyses with Epithelial Cells
+
+Before starting the exploratory analyses with epithelial cells, we need to repeat some of the previous steps, because it is possible that the initial set of HVGs and PCs, calculated using all cells, does not reflect the variability across the subset of epithelial cells.
+
+```{r}
+ep_tumour <- FindVariableFeatures(ep_tumour, selection.method = "vst",
+                                  nfeatures = 3000)
+ep_tumour <- ScaleData(ep_tumour, features = rownames(ep_tumour))
+ep_tumour <- RunPCA(ep_tumour, npcs = 50)
+ep_tumour <- RunUMAP(ep_tumour, dims = 1:20)
+```
+
+```{r}
+red <- "pca"
+ncomp <- 20
+ep_tumour <- FindNeighbors(ep_tumour, dims = 1:ncomp,
+                           reduction = red, graph.name = paste0(red, ncomp))
+
+ep_tumour <- FindClusters(ep_tumour, verbose = F,
+                         graph.name = paste0(red, ncomp),
+                         resolution = seq(0.2, 1.1, 0.1))
+
+# Setting a more sensible identity as default
+ep_tumour <- SetIdent(ep_tumour, value = paste0(red, ncomp, "_res.0.5"))
+```
+
+```{r, fig.width=14, fig.height=20}
+plt_list <- list()
+for(cl in colnames(ep_tumour@meta.data)[grepl("pca20_", colnames(ep_tumour@meta.data))]){
+  ep_tumour <- SetIdent(ep_tumour, value = cl)
+  plt_list[[cl]] <- DimPlot(ep_tumour, reduction = "umap",
+                            label = T, raster = T)+
+    labs(subtitle = cl)+
+    theme(legend.position = "none", aspect.ratio = 1)
+  }
+print(cowplot::plot_grid(plotlist = plt_list, ncol = 3))
+```
+
+```{r}
+# Setting identity according to the previous plots
+ep_tumour <- SetIdent(ep_tumour, value = paste0(red, ncomp, "_res.0.5"))
+
+DimPlot(ep_tumour, reduction = "umap", label = T, raster = T) + NoLegend()
+DimPlot(ep_tumour, reduction = "umap", split.by = "Patient",
+        ncol = 3, label = T, raster = T) + NoLegend()
+DimPlot(ep_tumour, reduction = "umap", group.by = "Patient",
+        label = F, raster = T)
+DimPlot(ep_tumour, reduction = "umap", group.by = "Cell_subtype", raster = T) +
+  labs(title = "Classification according to Lee et al.")
+```
+
+Find DEGs.
+
+```{r, fig.height=12, fig.width=15}
+ep_tumour_markers <- FindAllMarkers(ep_tumour, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.5, verbose = FALSE)
+
+top10_ep_tumour_markers <- ep_tumour_markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+DoHeatmap(ep_tumour, features = top10_ep_tumour_markers$gene)
+```
+
+Save.
+
+```{r}
+saveRDS(ep_tumour, file = "./Results/Tumour Cells/ep_tumour_2.RDS")
+#ep_tumour <- readRDS("./Results/Tumour Cells/ep_tumour_2.RDS")
+```
