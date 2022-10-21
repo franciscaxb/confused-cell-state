@@ -1,5 +1,6 @@
 ---
 title: "SMC Dataset Classification"
+author: "Francisca Xara-Brasil"
 output: html_notebook
 ---
 
