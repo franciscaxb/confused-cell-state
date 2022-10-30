@@ -274,7 +274,9 @@ saveRDS(cr_tumour_filt, file = "./Results/Tumour Cells/cr_tumour_filt_3.RDS")
 
 
 
-## 1.9. Identificaion and Selection of Epithelial Cells
+# 2. Exploratory Analyses with Epithelial Cells
+
+## 2.1. Identificaion and Selection of Epithelial Cells
 
 we are interested in analysing epithelial cells so, to identify them, we used two different approaches.
 
@@ -347,11 +349,7 @@ saveRDS(ep_tumour, file = "./Results/Tumour Cells/ep_tumour.RDS")
 # ep_tumour <- readRDS("./Results/Tumour Cells/ep_tumour.RDS")
 ```
 
-
-
-# 2. Exploratory Analyses with Epithelial Cells
-
-Before starting the exploratory analyses with epithelial cells, we need to repeat some of the previous steps, because it is possible that the initial set of HVGs and PCs, calculated using all cells, does not reflect the variability across the subset of epithelial cells.
+We need to repeat some of the previous steps, because it is possible that the initial set of HVGs and PCs, calculated using all cells, does not reflect the variability across the subset of epithelial cells.
 
 ```{r}
 ep_tumour <- FindVariableFeatures(ep_tumour, selection.method = "vst",

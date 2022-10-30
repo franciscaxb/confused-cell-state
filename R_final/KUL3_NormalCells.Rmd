@@ -55,7 +55,7 @@ https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE144735
 The data were not correctly formatted for Read10x function, so additional steps had to be performed once, following instructions here: https://www.biostars.org/p/449217/
 
 ```{r}
-data_dir <- "./Data/"
+data_dir <- "./Data/" 
 
 # Data have gene names as rows, and sample names/indexes as columns
 #data <- fread(paste0(data_dir, "/GSE144735_processed_KUL3_CRC_10X_raw_UMI_count_matrix.txt.gz"))
@@ -111,7 +111,7 @@ Visualise QC metrics as violin plots. Note that data was previously filtered by 
 and <20% of mitochondrial gene expression in UMI counts.
 
 ```{r, fig.width=10, fig.height=5}
-VlnPlot(cr_normal, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"))
+VlnPlot(cr_normal, features = c("nFeature_RNA", "nCount_RNA", "percent.mt")) 
 ```
 
 Visualise QC metrics as scatterplots, illustrating feature-feature relationships.
@@ -310,7 +310,9 @@ saveRDS(cr_normal_filt, file = "./Results/Normal Cells/cr_normal_filt_3.RDS")
 
 
 
-## 1.9. Identificaion and Selection of Epithelial Cells
+# 2. Exploratory Analyses with Epithelial Cells
+
+## 2.1. Identificaion and Selection of Epithelial Cells
 
 we are interested in analysing epithelial cells so, to identify them, we used two different approaches.
 
@@ -381,9 +383,6 @@ saveRDS(ep_normal, file = "./Results/Normal Cells/ep_normal.RDS")
 ```
 
 
-
-# 2. Exploratory Analyses with Epithelial Cells
-
 Before starting the exploratory analyses with epithelial cells, we need to repeat some of the previous steps, because it is possible that the initial set of HVGs and PCs, calculated using all cells, does not reflect the variability across the subset of epithelial cells.
 
 ```{r}
@@ -441,7 +440,8 @@ saveRDS(ep_normal, file = "./Results/Normal Cells/ep_normal_2.RDS")
 ```
 
 
-## 2.1. Annotation and Connectivity Analysis of Normal Epithelial Cell Types
+
+## 2.2. Annotation and Connectivity Analysis of Normal Epithelial Cell Types
 
 ### Annotation of Normal Epithelial Cells
 
@@ -545,7 +545,7 @@ sc$pl$paga(adata_ep_normal,
 
 
 
-## 2.2. Definition of Gene Signatures for Normal Epithelial Cell Types
+## 2.3. Definition of Gene Signatures for Normal Epithelial Cell Types
 
 
 After annotating the clusters of normal epithelial cells, we want to define the gene signature of each cell type, in order to build a classifier in the next step. For that, we will use two different methods.
