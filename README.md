@@ -1,5 +1,5 @@
 # confused-cell-state
-This repository is part of the work of my Master's Thesis with the title "Depicting novel tumour cell states through single-cell transcriptome profiles in colorectal cancer".
+This repository is part of the work of my Master's Thesis with the title "Depicting novel tumour cell states through single-cell transcriptome profiles".
 
 It includes, in total, 6 R Notebooks:
 1) KUL3_NormalCells.RMD
